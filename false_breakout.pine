@@ -1,0 +1,193 @@
+// @version=6
+strategy("Donchian Channel False Breakout Reversal Strategy", 
+     overlay=true, 
+     precision=2, 
+     initial_capital=200000, 
+     pyramiding=0, 
+     default_qty_type = strategy.fixed)
+
+//====================
+// 基本信息
+//====================
+// 确定当前图表是否为期货合约
+is_futures = str.contains(syminfo.type, "futures")
+
+// 合约点值
+point_value = is_futures ? syminfo.pointvalue : 1
+
+
+//====================
+// 参数设置部分
+//====================
+// 通道参数
+channel_period = input.int(20, "唐奇安通道周期", minval=5, maxval=100, group="通道设置")
+// 突破参数
+breakout_pct = input.float(0.01, "突破确认百分比", minval=0.01, maxval=1, step=0.01, group="突破设置")
+breakout_window = input.int(5, "突破时间窗口", minval=1, maxval=10, group="突破设置")
+// 假突破参数
+volume_ratio = input.float(1.0, "成交量比率阈值（0-1）", minval=0.5, maxval=2.0, step=0.1, group="假突破设置")
+
+entry_delay = input.int(0, "入场延迟验证周期", minval=0, maxval=3, group="假突破设置")
+
+// 出场参数
+take_profit_pct = input.float(0.5, "止盈目标(通道宽度百分比)", minval=0, maxval=1, step=0.01, group="出场设置")
+stop_loss_pct = input.float(0.01, "止损百分比(突破位置)", minval=0, maxval=1, step=0.01, group="出场设置")
+time_stop = input.int(15, "时间止盈(K线数)", minval=5, maxval=50, group="出场设置")
+
+// 过滤条件
+use_atr_filter = input.bool(true, "使用ATR波动率过滤", group="过滤条件")
+atr_filter_period = input.int(50, "ATR参考周期", minval=10, maxval=100, group="过滤条件")
+atr_filter_ratio = input.float(1, "ATR最小比率(%)", minval=0, maxval=2, group="过滤条件")
+
+// 仓位和风险参数
+risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") / 100
+
+//====================
+// 计算指标部分
+//====================
+
+// 计算唐奇安通道
+upper_band = ta.highest(high, channel_period)
+lower_band = ta.lowest(low, channel_period)
+channel_width = upper_band - lower_band
+
+// 绘制通道
+plot(upper_band, "Upper", color=color.new(color.blue, 0), linewidth=1)
+plot(lower_band, "Lower", color=color.new(color.blue, 0), linewidth=1)
+
+// 计算成交量指标
+vol_ma = ta.sma(volume, channel_period)
+vol_ratio = volume / vol_ma
+
+// 计算MACD指标用于辅助确认
+[macd_line, signal_line, hist_line] = ta.macd(close, 20, 60, 20)
+
+// 计算ATR指标用于过滤
+atr = ta.atr(atr_filter_period)
+atr_ma = ta.sma(atr, atr_filter_period)
+
+//====================
+// 信号生成部分
+//====================
+
+// 历史高点
+upper_band_with_reversal = upper_band[breakout_window]
+// 历史低点
+lower_band_with_reversal = lower_band[breakout_window]
+
+// 曾经突破过
+upper_breakout = close > (upper_band_with_reversal + channel_width * breakout_pct) and close > open
+lower_breakout = close < (lower_band_with_reversal - channel_width * breakout_pct) and open > close
+
+// 在图表上标记信号
+plotshape(upper_breakout, "突破", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+plotshape(lower_breakout, "突破", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+
+// 上轨假突破
+upper_false_breakout = false
+
+// 检查成交量减少
+volume_check = vol_ratio[breakout_window] <= volume_ratio
+// 检查MACD柱状体是否减弱
+macd_check = hist_line < hist_line[breakout_window]
+
+if upper_breakout
+    // 检查价格是否回到通道内
+    price_reversal_check = close < upper_band_with_reversal
+
+    log.info(str.tostring(close) + '  ' + str.tostring(upper_band_with_reversal))
+    // 成交量减少、价格回落、MACD 减弱
+    upper_false_breakout := price_reversal_check or volume_check and price_reversal_check and macd_check
+
+// 下轨假突破
+lower_false_breakout = false
+
+if lower_breakout
+    // 检查价格是否回到通道内
+    price_reversal_check = close >= lower_band_with_reversal
+    // 成交量减少、价格回升、MACD 减弱
+    lower_false_breakout := price_reversal_check or volume_check and price_reversal_check and macd_check
+
+// // 在图表上标记信号
+// plotshape(upper_false_breakout, "假突破", location=location.belowbar, color=color.green, style=shape.triangledown, size=size.small)
+// plotshape(lower_false_breakout, "假突破", location=location.belowbar, color=color.red, style=shape.triangleup, size=size.small)
+
+// 延迟入场
+if entry_delay > 0 and false
+    // 确认延迟期内没有再次突破
+    no_new_upper_break = true
+    no_new_lower_break = true
+    
+    for i = 0 to entry_delay
+        if close[i] > upper_band + channel_width * breakout_pct
+            no_new_upper_break := false
+        if close[i] < lower_band - channel_width * breakout_pct
+            no_new_lower_break := false
+    
+    upper_false_breakout := upper_false_breakout and no_new_upper_break
+    lower_false_breakout := lower_false_breakout and no_new_lower_break
+
+// 应用过滤条件
+if use_atr_filter and false
+    atr_filter = atr >= atr_ma * atr_filter_ratio
+    upper_false_breakout := upper_false_breakout and atr_filter
+    lower_false_breakout := lower_false_breakout and atr_filter
+
+//====================
+// 交易执行部分
+//====================
+
+// 生成交易信号
+long_condition = lower_false_breakout
+short_condition = upper_false_breakout
+
+// 设置止盈价格
+long_take_profit = lower_band + (channel_width * take_profit_pct)
+short_take_profit = upper_band - (channel_width * take_profit_pct)
+
+// 设置止损价格
+long_stop_price = lower_band * (1 - stop_loss_pct)
+short_stop_price = upper_band * (1 + stop_loss_pct)
+
+
+// 计算止损点数
+stop_points = long_condition ? close - long_stop_price : short_condition ? short_stop_price - close : na
+
+// 单笔风险
+max_loss_amount = strategy.equity * risk_percent
+
+// 计算合适的仓位大小（手数）
+position_size_plan = math.floor(max_loss_amount / stop_points / point_value)
+
+// 执行交易
+if long_condition
+    strategy.entry("Long", strategy.long, position_size_plan)
+    strategy.exit("Exit Long", "Long", stop=long_stop_price)
+    
+if short_condition
+    strategy.entry("Short", strategy.short, position_size_plan)
+    strategy.exit("Exit Short", "Short", stop=short_stop_price)
+
+// 绘制止损价位线（只在有持仓时显示）
+stop_loss_color = strategy.position_size > 0 ? color.new(color.red, 0) : strategy.position_size < 0 ? color.new(color.green, 0) : na
+
+plot(strategy.position_size > 0 ? long_stop_price : strategy.position_size < 0 ? short_stop_price : na, color=stop_loss_color, linewidth=1, style=plot.style_stepline, title="Stop Loss")
+
+// 时间止盈
+var int bar_since = 0
+
+bar_since := ta.barssince(strategy.position_size != 0)
+
+if strategy.position_size > 0 and bar_since >= time_stop
+    strategy.close("Long", comment="Time Stop")
+    
+if strategy.position_size < 0 and bar_since >= time_stop
+    strategy.close("Short", comment="Time Stop")
+
+// 价格止盈
+if strategy.position_size > 0 and close > long_take_profit
+    strategy.close("Long", comment="Pofit Stop")
+
+if strategy.position_size < 0 and close < short_take_profit
+    strategy.close("Short", comment="Pofit Stop")
+    

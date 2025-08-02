@@ -1,0 +1,56 @@
+//@version=6
+strategy("DCA Strategy: Fixed Amount Every Monday, 30% Profit Target", overlay=true, pyramiding=9999, default_qty_type=strategy.fixed, process_orders_on_close=true)
+
+// 参数设置
+var float investment_amount = 5000.0  // 每次买入的固定金额
+var float profit_target = 30.0        // 30%的止盈线
+
+// 追踪持仓状态
+var float total_investment = 0.0
+var float total_shares = 0.0
+
+// 检测时间条件：是否为周一的第一根K线
+is_monday = dayofweek == dayofweek.monday
+is_first_bar_of_day = na(time_close[1]) or time_close[1] < time - 1000*60*60*6  // 如果前一根K线的时间戳与当前差超过6小时，认为是新的一天
+
+// 执行买入策略（仅在周一的第一根K线买入固定金额）
+if is_monday and is_first_bar_of_day
+    // 计算可以买入的股数，并调整为100的整数倍
+    shares_to_buy = investment_amount / close
+    adjusted_shares = math.floor(shares_to_buy / 100) * 100
+    
+    // 确保买入的股数至少为100
+    if adjusted_shares >= 100
+        // 实际投入的资金
+        actual_investment = adjusted_shares * close
+        
+        // 执行买入操作
+        strategy.entry("Buy", strategy.long, qty=adjusted_shares)
+        
+        // 更新总投入资金和持有总股数
+        total_investment := total_investment + actual_investment
+        total_shares := total_shares + adjusted_shares
+        
+
+// 计算当前市值（仍然需要手动计算这个）
+current_value = total_shares > 0 ? total_shares * close : 0
+
+// 使用内置变量判断止盈
+if strategy.openprofit_percent >= profit_target
+    // 执行全部卖出操作
+    strategy.close_all("Take Profit: Return rate reached " + str.tostring(profit_target, "#.##") + "%")
+    
+    // 重置持仓状态
+    total_investment := 0.0
+    total_shares := 0.0
+
+// 在图表上显示当前持仓状态（使用中文标签）
+var label status_label = na
+label.delete(status_label)
+status_label := label.new(bar_index, high, 
+                 "总投入: " + str.tostring(total_investment, "#.##") + "\n" +
+                 "持有股数: " + str.tostring(total_shares) + "\n" +
+                 "当前市值: " + str.tostring(current_value, "#.##") + "\n" +
+                 "收益率: " + str.tostring(strategy.openprofit_percent, "#.##") + "%",
+                 style=label.style_label_down,
+                 color=strategy.openprofit_percent >= 0 ? color.green : color.red)

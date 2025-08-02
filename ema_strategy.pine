@@ -1,0 +1,332 @@
+//@version=6
+// =============== 策略基本设置 ===============
+strategy("EMA Strategy - 0330", 
+     overlay=true, 
+     precision=2, 
+     initial_capital=200000, 
+     pyramiding=0, 
+     default_qty_type = strategy.fixed,
+     margin_long=100,
+     margin_short=100,
+     process_orders_on_close=true)
+
+// =============== 参数设置（按功能分组） ===============
+// --- 交易标的参数 ---
+// 确定当前图表是否为期货合约
+is_futures = str.contains(syminfo.type, "futures")
+// 合约点值
+point_value = syminfo.pointvalue
+
+// --- 技术指标参数 ---
+// EMA参数
+ema_short_length = input.int(20, "短期EMA周期", minval=1, group="EMA设置")
+ema_long_length = input.int(60, "长期EMA周期", minval=1, group="EMA设置")
+
+// ATR参数
+atr_length = input.int(20, "ATR周期", minval=1, group="ATR设置")
+
+// 唐奇安通道参数
+dc_length = input.int(60, "唐奇安通道周期", minval=1, group="唐奇安通道设置")
+
+// --- 风险管理参数 ---
+risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") * 0.01
+
+// --- 追踪止盈参数 ---
+profit_multiple_threshold = input.float(5.0, "激活追踪止盈的利润倍数", minval=1.0, step=0.5, group="追踪止盈设置")
+trailing_atr_multiple = input.float(1.5, "追踪止盈ATR倍数", minval=0.5, step=0.1, group="追踪止盈设置")
+profit_freeze_hours = input.float(5, "追踪止盈冷却时长", minval=0, step=1, group="追踪止盈设置") * 24
+window_size = input.int(12, "入场后观察K线数", minval=1, group="时间窗口止盈设置")
+
+// --- K线时间，方便调试 ---
+// 获取各个时间组件
+yr = year(time)
+mo = month(time)
+dy = dayofmonth(time)
+hr = hour(time)
+min = minute(time)
+sec = second(time)
+
+// 转换月、日、时、分、秒为两位数格式
+mo_str = mo < 10 ? "0" + str.tostring(mo) : str.tostring(mo)
+dy_str = dy < 10 ? "0" + str.tostring(dy) : str.tostring(dy)
+hr_str = hr < 10 ? "0" + str.tostring(hr) : str.tostring(hr)
+min_str = min < 10 ? "0" + str.tostring(min) : str.tostring(min)
+
+// 组合成最终格式
+k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
+
+// =============== 交易限制逻辑 ===============
+// 多空交易约束 - 期货可做多做空，股票只能做多
+strategy.risk.allow_entry_in(is_futures ? strategy.direction.all : strategy.direction.long)
+
+// 交易时间限制计算
+fiveYearsInMs = 5 * 365 * 24 * 60 * 60 * 1000
+in_trading_timeframe =  time > (timenow - fiveYearsInMs)
+
+// =============== 状态变量定义 ===============
+// --- 交易状态跟踪 ---
+var int bars_since_entry = 0
+var bool in_trade_window = false
+
+// --- 市场方向状态 ---
+var market_bias = 0  // 0=中性, 1=多头倾向, -1=空头倾向
+
+// 添加市场风格不一致的标记变量
+var bool premature_entry = false
+
+// --- 止损相关变量 ---
+var float stop_prize = 0
+
+// --- 追踪止盈变量 ---
+var bool trailing_stop_active_long = false
+var bool trailing_stop_active_short = false
+var float trailing_stop_price_long = 0.0
+var float trailing_stop_price_short = 0.0
+
+// --- 时间冷却变量 ---
+var int profit_exit_time = 0  // 记录最近一次止盈时间戳
+var bool in_cooldown = false  // 是否处于冷却期
+
+// --- T+1限制相关变量 ---
+var int buy_date = 0
+var bool stop_loss_pending = false
+
+// =============== 技术指标计算 ===============
+// --- EMA指标 ---
+ema_short = ta.ema(close, ema_short_length)
+ema_long = ta.ema(close, ema_long_length)
+ema_diff = ema_short - ema_long
+
+// --- ATR指标 ---
+atr = ta.atr(atr_length)
+
+// --- 唐奇安通道 ---
+dc_upper = ta.highest(high, dc_length)
+dc_lower = ta.lowest(low, dc_length)
+dc_upper_rising = ta.rising(dc_upper, 1)  // 上轨是否升高
+dc_lower_falling = ta.falling(dc_lower, 1)  // 下轨是否降低
+
+// --- K线形态分析 ---
+body_size = math.abs(close - open)
+significant_body = body_size > atr
+
+is_bullish_candle = significant_body and close > open
+is_bearish_candle = significant_body and close < open
+
+upper_shadow = high - math.max(open, close)
+lower_shadow = math.min(open, close) - low
+is_upper_shadow = upper_shadow / (body_size * 0.9) >= 1
+is_lower_shadow = lower_shadow / (body_size * 0.9) >= 1
+
+// =============== 市场方向识别 ===============
+// 均线交叉信号
+ema_cross_long = ta.crossover(ema_short, ema_long)
+ema_cross_short = ta.crossunder(ema_short, ema_long)
+
+// 更新市场方向
+if ema_cross_long
+    market_bias := 1
+if ema_cross_short
+    market_bias := -1
+
+// =============== 仓位与风险管理 ===============
+// 计算止损点数
+stop_points = atr * 2
+
+// 单笔风险
+max_loss_amount = strategy.equity * risk_percent
+
+// 计算合适的仓位大小
+position_size_plan = math.floor(max_loss_amount / stop_points / point_value)
+
+// =============== 冷却状态计算 ===============
+// 计算冷却状态
+cooldown_period_ms = profit_freeze_hours * 60 * 60 * 1000  // 转换为毫秒
+is_in_cooldown = profit_exit_time > 0 and (time - profit_exit_time) < cooldown_period_ms
+
+// =============== 入场条件定义 ===============
+// --- 多头条件数组 ---
+long_conditions = array.new_bool(4)
+array.set(long_conditions, 0, market_bias == 1 and math.abs(ema_diff) > atr)       // 条件1：EMA交叉和差值
+array.set(long_conditions, 1, dc_upper_rising)                                     // 条件3：唐奇安通道上轨走势
+array.set(long_conditions, 2, is_bullish_candle)                                   // 条件4：上涨实体
+array.set(long_conditions, 3, not is_upper_shadow)                                 // 条件5：不是上影线
+
+// --- 空头条件数组 ---
+short_conditions = array.new_bool(4)
+array.set(short_conditions, 0, market_bias == -1 and math.abs(ema_diff) > atr)     // 条件1：EMA交叉和差值
+array.set(short_conditions, 1, dc_lower_falling)                                   // 条件3：唐奇安通道下轨走势
+array.set(short_conditions, 2, is_bearish_candle)                                  // 条件4：下跌实体
+array.set(short_conditions, 3, not is_lower_shadow)                                // 条件5：不是下影线
+
+
+// 统计满足条件数量
+long_condition_count = 0
+short_condition_count = 0
+
+for i = 0 to array.size(long_conditions) - 1
+    if array.get(long_conditions, i)
+        long_condition_count := long_condition_count + 1
+
+for i = 0 to array.size(short_conditions) - 1
+    if array.get(short_conditions, i)
+        short_condition_count := short_condition_count + 1
+
+// 最终入场条件
+long_entry_condition = strategy.position_size == 0 and in_trading_timeframe and
+                      long_condition_count >= 3 and
+                      not is_in_cooldown
+
+short_entry_condition = strategy.position_size == 0 and in_trading_timeframe and
+                       short_condition_count >= 3 and
+                       not is_in_cooldown
+
+// =============== 止盈止损条件 ===============
+// --- 止损条件 ---
+long_stop_condition = strategy.position_size > 0 and close <= stop_prize
+short_stop_condition = strategy.position_size < 0 and close >= stop_prize
+
+// --- 追踪止盈逻辑 ---
+// 更新追踪止盈状态和价格
+if strategy.position_size > 0
+    // 多头追踪止盈
+    if not trailing_stop_active_long and strategy.openprofit > max_loss_amount * profit_multiple_threshold
+        trailing_stop_active_long := true
+        trailing_stop_price_long := math.max(trailing_stop_price_long, close - atr * trailing_atr_multiple)
+    
+    // 如果追踪止盈已激活，则更新追踪止盈价格（只上移不下移）
+    if trailing_stop_active_long
+        trailing_stop_price_long := math.max(trailing_stop_price_long, close - atr * trailing_atr_multiple)
+
+else if strategy.position_size < 0
+    // 空头追踪止盈
+    if not trailing_stop_active_short and strategy.openprofit > max_loss_amount * profit_multiple_threshold
+        trailing_stop_active_short := true
+        trailing_stop_price_short := close + atr * trailing_atr_multiple
+    
+    // 如果追踪止盈已激活，则更新追踪止盈价格（只下移不上移）
+    if trailing_stop_active_short
+        trailing_stop_price_short := math.min(trailing_stop_price_short, close + atr * trailing_atr_multiple)
+
+// --- 止盈条件 ---
+// 基础条件：市场风格切换
+long_bias_switch = strategy.position_size > 0 and (ema_short < ema_long and is_bearish_candle) and not premature_entry
+short_bias_switch = strategy.position_size < 0 and (ema_short > ema_long and is_bullish_candle) and not premature_entry
+
+// 追踪止盈条件：高倍盈亏比
+trailing_long_exit = trailing_stop_active_long and close <= trailing_stop_price_long
+trailing_short_exit = trailing_stop_active_short and close >= trailing_stop_price_short
+
+// 时间窗口止盈条件：入场后震荡
+time_window_exit_condition = in_trade_window and bars_since_entry == window_size and 
+                             strategy.openprofit < max_loss_amount * 0.5
+
+// 合并止盈条件
+long_profit_exit = long_bias_switch or trailing_long_exit or time_window_exit_condition
+short_profit_exit = short_bias_switch or trailing_short_exit or time_window_exit_condition
+
+// =============== 时间冷却管理 ===============
+// 在任何止盈触发时重置计数器
+if long_profit_exit or short_profit_exit 
+    if trailing_long_exit or trailing_short_exit
+        profit_exit_time := time
+
+// =============== 在每个K线更新市场风格状态 ===============
+if premature_entry
+    // 如果提前入场做多，且市场风格转为多头，则重置标记
+    if strategy.position_size > 0 and market_bias == 1
+        premature_entry := false
+    
+    // 如果提前入场做空，且市场风格转为空头，则重置标记
+    if strategy.position_size < 0 and market_bias == -1
+        premature_entry := false
+
+// =============== 策略执行 ===============
+// --- 状态跟踪 ---
+if strategy.position_size != 0 and in_trade_window
+    bars_since_entry := bars_since_entry + 1
+    
+    // 如果超过了观察窗口，停止监控
+    if bars_since_entry > window_size
+        in_trade_window := false
+
+// --- 多头入场 ---
+if long_entry_condition
+    stop_prize := close - stop_points
+
+    trailing_stop_active_long := false  // 重置追踪止盈状态
+
+    // 记录入场时的市场风格状态，判断是否是早入场 
+    premature_entry := market_bias != 1
+
+
+    // 重置K线计数器并激活时间窗口监控
+    bars_since_entry := 0
+    in_trade_window := true
+    
+    strategy.entry("Long", strategy.long, position_size_plan)
+    // 初始止损
+    strategy.exit("Long_Stop_Loss", "Long", stop=stop_prize)
+
+// --- 空头入场（仅期货） ---
+if short_entry_condition 
+    stop_prize := close + stop_points
+
+    trailing_stop_active_short := false  // 重置追踪止盈状态
+
+    // 记录入场时的市场风格状态，判断是否是早入场 
+    premature_entry := market_bias != -1
+
+    // 重置K线计数器并激活时间窗口监控
+    bars_since_entry := 0
+    in_trade_window := true
+    
+    strategy.entry("Short", strategy.short, position_size_plan)
+    // 初始止损
+    strategy.exit("Short_Stop_Loss", "Short", stop=stop_prize)
+
+// --- 止盈处理 ---
+// 多头止盈
+if long_profit_exit and strategy.position_size > 0 
+    comment = time_window_exit_condition ? "Long_Window_Take_Profit" : 
+         trailing_long_exit ? "Long_Take_Profit_Trailing" : "Long_Take_Profit"
+
+    strategy.close("Long", comment)
+    trailing_stop_active_long := false  // 重置追踪止盈状态
+    in_trade_window := false
+
+// 空头止盈
+if short_profit_exit and strategy.position_size < 0
+    comment = time_window_exit_condition ? "Short_Window_Take_Profit" :
+         trailing_short_exit ? "Short_Take_Profit_Trailing" : "Short_Take_Profit"
+    strategy.close("Short", comment=comment)
+    trailing_stop_active_short := false  // 重置追踪止盈状态
+    in_trade_window := false
+
+// =============== 绘制指标 ===============
+// 绘制EMA线
+plot(ema_short, color=color.blue, linewidth=1, title="EMA-S")
+plot(ema_long, color=color.red, linewidth=1, title="EMA-L")
+
+// 绘制唐奇安通道
+plot(dc_upper, color=color.new(#FF9800, 70), linewidth=1, title="DC Upper")
+plot(dc_lower, color=color.new(#FF9800, 70), linewidth=1, title="DC Lower")
+
+// 绘制止损价位线
+stop_loss_color = strategy.position_size > 0 ? color.new(color.red, 0) : 
+                 strategy.position_size < 0 ? color.new(color.green, 0) : na
+
+plot(strategy.position_size != 0 ? stop_prize : na, 
+     color=stop_loss_color, 
+     linewidth=1, 
+     style=plot.style_stepline, 
+     title="Stop Loss")
+
+// =============== 信息显示 ===============
+var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
+label.set_xy(info, bar_index, high)
+
+label.set_text(info, "" +
+     "\n\n权益：" + str.tostring(math.round(strategy.equity)) + " / " + str.tostring(math.round(max_loss_amount)) +
+     "\n\n浮盈：" + str.tostring(math.round(strategy.openprofit)) + " / " + str.tostring(math.round(strategy.openprofit / max_loss_amount, 2))
+     )

@@ -1,0 +1,254 @@
+//@version=6
+// =============== 策略设置 ===============
+strategy("EMA Strategy - A股", 
+     overlay=true, 
+     precision=2, 
+     initial_capital=200000, 
+     pyramiding=0, 
+     default_qty_type = strategy.fixed,
+     margin_long=100,
+     margin_short=100)
+
+// =============== 多空交易约束 ===============
+// 仅允许做多
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+// =============== 参数设置 ===============
+// EMA参数
+ema_short_length = input.int(20, "短期EMA周期", minval=1, group="EMA设置")
+ema_long_length = input.int(60, "长期EMA周期", minval=1, group="EMA设置")
+
+// ATR参数
+atr_length = input.int(20, "ATR周期", minval=1, group="ATR设置")
+
+// 唐奇安通道参数
+dc_length = input.int(60, "唐奇安通道周期", minval=1, group="唐奇安通道设置")
+
+// 仓位和风险参数
+risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") * 0.01
+
+// =============== 追踪止盈设置 ===============
+profit_multiple_threshold = input.float(5.0, "激活追踪止盈的利润倍数", minval=1.0, step=0.5, group="追踪止盈设置")
+trailing_atr_multiple = input.float(1.5, "追踪止盈ATR倍数", minval=0.5, step=0.1, group="追踪止盈设置")
+
+profit_freeze_time = input.float(5, "止盈冷却时长", minval=0, step=1, group="追踪止盈设置")
+
+// =============== A股特有设置 ===============
+enable_t1_restriction = input.bool(true, "启用T+1交易限制", group="A股特有设置")
+five_year_limitation = input.bool(true, "仅在最近5年内交易", group="A股特有设置")
+
+// 股票回测时间限制 (5年)
+// 计算5年的毫秒数 (5 * 365 * 24 * 60 * 60 * 1000)
+fiveYearsInMs = 5 * 365 * 24 * 60 * 60 * 1000
+// 是否在交易时间范围内
+in_trading_timeframe = not five_year_limitation or time > (timenow - fiveYearsInMs)
+
+// =============== 指标计算 ===============
+// 计算EMA
+ema_short = ta.ema(close, ema_short_length)
+ema_long = ta.ema(close, ema_long_length)
+ema_diff = ema_short - ema_long
+
+// 计算ATR
+atr = ta.atr(atr_length)
+
+// 计算唐奇安通道
+dc_upper = ta.highest(high, dc_length)
+dc_lower = ta.lowest(low, dc_length)
+
+// 计算K线形态
+// 看涨 K 线
+is_bullish_candle = close > open
+// 看跌 K 线
+is_bearish_candle = close < open
+
+// 计算实体大小和影线
+body_size = math.abs(close - open)
+upper_shadow = high - math.max(open, close)
+lower_shadow = math.min(open, close) - low
+
+significant_body = body_size > atr
+
+// 识别显著的上影线和下影线
+is_upper_shadow = significant_body and upper_shadow / (body_size * 0.9) >= 1
+is_lower_shadow = significant_body and lower_shadow / (body_size * 0.9) >= 1
+
+// =============== 方向判断 ===============
+// 均线交叉信号
+ema_cross_long = ta.crossover(ema_short, ema_long)
+ema_cross_short = ta.crossunder(ema_short, ema_long)
+
+// 记录市场方向的状态变量
+var market_bias = 0  // 0=中性, 1=多头倾向, -1=空头倾向
+
+// 更新市场方向并记录
+if ema_cross_long
+    market_bias := 1
+if ema_cross_short
+    market_bias := -1
+
+// =============== 仓位计算 ==============
+// 计算止损点数
+stop_points = atr * 2
+
+// 单笔风险
+max_loss_amount = strategy.equity * risk_percent
+
+// 计算合适的仓位大小（手数）
+position_size_plan = math.floor(max_loss_amount / stop_points / 1)  // A股 pointvalue=1
+
+// 向下取整到最接近的100的倍数
+position_size_plan := math.floor(position_size_plan / 100) * 100
+// 如果股数小于100，则无法交易
+if position_size_plan < 100
+    position_size_plan := 0
+
+// =============== 止损变量 ===============
+// 止损价格
+var float stop_prize = 0
+
+// =============== 追踪止盈变量 ===============
+// 追踪止盈状态
+var bool trailing_stop_active_long = false
+// 追踪止盈价格
+var float trailing_stop_price_long = 0.0
+
+// =============== 时间冷却变量 ===============
+var int days_since_profit_exit = 0
+
+// =============== T+1限制相关变量 ===============
+// 记录买入日期 (仅用于A股)
+var int buy_date = 0
+// 记录当前是否有止损触发但因T+1限制而未执行
+var bool stop_loss_pending = false
+
+// =============== 入场信号 ===============
+// 定义唐奇安通道趋势条件
+dc_upper_rising = ta.rising(dc_upper, 1)  // 上轨是否升高
+
+// 多头条件数组
+long_conditions = array.new_bool(5)
+array.set(long_conditions, 0, market_bias == 1 and math.abs(ema_diff) > atr)       // 条件1：EMA交叉和差值
+array.set(long_conditions, 1, (close - open) >= atr * 1.2)                         // 条件2：K线幅度
+array.set(long_conditions, 2, dc_upper_rising)                                     // 条件3：唐奇安通道上轨走势
+array.set(long_conditions, 3, is_bullish_candle)                                   // 条件4：上涨实体
+array.set(long_conditions, 4, not is_upper_shadow)                                 // 条件5：不是上影线
+
+// 计算满足的条件数量
+long_condition_count = 0
+
+// 使用循环统计满足的条件数量
+for i = 0 to array.size(long_conditions) - 1
+    if array.get(long_conditions, i)
+        long_condition_count := long_condition_count + 1
+
+// 最终入场条件，增加时间限制条件
+long_entry_condition = strategy.position_size == 0 and in_trading_timeframe and
+                      long_condition_count >= 4 and
+                      (days_since_profit_exit == 0 or days_since_profit_exit > profit_freeze_time)
+
+// =============== 追踪止盈逻辑计算 ===============
+if strategy.position_size > 0
+    // 检查是否达到追踪止盈激活条件
+    if not trailing_stop_active_long and strategy.openprofit > max_loss_amount * profit_multiple_threshold
+        trailing_stop_active_long := true
+        trailing_stop_price_long := math.max(trailing_stop_price_long, close - atr * trailing_atr_multiple)
+    
+    // 如果追踪止盈已激活，则更新追踪止盈价格（只上移不下移）
+    if trailing_stop_active_long
+        trailing_stop_price_long := math.max(trailing_stop_price_long, close - atr * trailing_atr_multiple)
+
+// 在每个交易日更新冷却计数器
+if not na(time_close)  // 检查是否有当天收盘时间数据
+    if days_since_profit_exit > 0
+        days_since_profit_exit := days_since_profit_exit + 1
+
+// =============== 检查T+1条件 ===============
+// 判断是否满足T+1条件
+can_sell_today = not enable_t1_restriction or (buy_date != 0 and dayofmonth(time) != dayofmonth(buy_date))
+
+// =============== 止损条件检查 ===============
+// 多头止损条件 
+long_stop_condition = strategy.position_size > 0 and close <= stop_prize
+
+// 检查是否可以执行之前因T+1限制而挂起的止损
+execute_pending_stop = stop_loss_pending and can_sell_today
+
+// =============== 止盈信号 ===============
+// 原始止盈条件
+// 多头止盈条件
+base_long_profit_exit = strategy.position_size > 0 and (ema_short < ema_long and is_bearish_candle)
+
+// 追踪止盈条件
+trailing_long_exit = trailing_stop_active_long and close <= trailing_stop_price_long
+
+// 合并止盈条件
+long_profit_exit = base_long_profit_exit or trailing_long_exit
+
+// 在任何止盈触发时重置计数器
+if long_profit_exit 
+    days_since_profit_exit := 1
+
+// =============== 执行策略 ===============
+// 多头入场
+if long_entry_condition and position_size_plan >= 100
+    stop_prize := close - stop_points
+    trailing_stop_active_long := false  // 重置追踪止盈状态
+    
+    // 记录买入日期
+    if enable_t1_restriction
+        buy_date := time
+        stop_loss_pending := false
+    
+    strategy.entry("Long", strategy.long, position_size_plan)
+    
+    // 如果未启用T+1限制，直接设置止损
+    if not enable_t1_restriction
+        strategy.exit("Long_Stop_Loss", "Long", stop=stop_prize)
+
+// 处理多头止损
+if long_stop_condition and strategy.position_size > 0
+    if can_sell_today
+        // 如果满足T+1条件，执行止损
+        strategy.close("Long", comment="Long_Stop_Loss")
+        stop_loss_pending := false
+    else
+        // 否则标记为待执行止损
+        stop_loss_pending := true
+
+// 如果有待执行的止损且当天可以卖出
+if execute_pending_stop and strategy.position_size > 0
+    strategy.close("Long", comment="Long_Stop_Loss_T+1")
+    stop_loss_pending := false
+
+// 执行止盈
+if long_profit_exit and strategy.position_size > 0 and can_sell_today
+    strategy.close("Long", comment="Long_Take_Profit")
+    trailing_stop_active_long := false  // 重置追踪止盈状态
+
+// =============== 绘制指标 ===============
+// 绘制EMA线
+plot(ema_short, color=color.blue, linewidth=1, title="EMA-S")
+plot(ema_long, color=color.red, linewidth=1, title="EMA-L")
+
+// 绘制唐奇安通道
+plot(dc_upper, color=color.new(#FF9800, 70), linewidth=1, title="DC Upper")
+plot(dc_lower, color=color.new(#FF9800, 70), linewidth=1, title="DC Lower")
+
+// 绘制止损价位线（只在有持仓时显示）
+stop_loss_color = strategy.position_size > 0 ? color.new(color.red, 0) : na
+
+plot(strategy.position_size != 0 ? stop_prize : na, color=stop_loss_color, linewidth=1, style=plot.style_stepline, title="Stop Loss")
+
+// =============== 信息显示 ===============
+var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
+label.set_xy(info, bar_index, high)
+
+// 标记是否有T+1限制
+t1_status = enable_t1_restriction ? "T+1限制：开启" : "T+1限制：关闭"
+
+label.set_text(info, "股票模式" + 
+     "\n\n权益：" + str.tostring(math.round(strategy.equity)) + 
+     "\n\n浮盈：" + str.tostring(math.round(strategy.openprofit)) +
+     "\n\n单笔风险：" + str.tostring(math.round(max_loss_amount)) +
+     "\n\n" + t1_status)

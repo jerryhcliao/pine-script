@@ -1,0 +1,204 @@
+//@version=6
+// =============== 策略设置 ===============
+strategy("网格交易策略 - A股 (改进版)", 
+     overlay=true, 
+     precision=2, 
+     initial_capital=200000, 
+     pyramiding=40, 
+     default_qty_type = strategy.fixed,
+     margin_long=100,
+     margin_short=100,
+     process_orders_on_close=true)
+
+// =============== 多空交易约束 ===============
+// 仅允许做多
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+// =============== 网格策略参数 ===============
+initial_position_amount = input.float(50000, "初始建仓金额(元)", minval=1000, group="网格设置")
+grid_drop_percent = input.float(5.0, "网格下跌百分比(%)", minval=1.0, step=0.5, group="网格设置") * 0.01
+take_profit_percent = input.float(10.0, "止盈百分比(%)", minval=1.0, step=0.5, group="网格设置") * 0.01
+grid_increase_percent = input.float(10.0, "加仓比例(%)", minval=1.0, step=1.0, group="网格设置") * 0.01
+max_reentry_drawdown = input.float(0.0, "清仓后最大回撤重入(%)", minval=0.0, step=0.5, group="网格设置") * 0.01
+max_grids = input.int(30, "最大网格层数", minval=1, maxval=40, group="网格设置")
+
+// =============== A股特有设置 ===============
+five_year_limitation = input.bool(true, "仅在最近5年内交易", group="A股特有设置")
+
+// 股票回测时间限制 (5年)
+fiveYearsInMs = 5 * 365 * 24 * 60 * 60 * 1000
+in_trading_timeframe = not five_year_limitation or time > (timenow - fiveYearsInMs)
+
+// --- K线时间，方便调试 ---
+// 获取各个时间组件
+yr = year(time)
+mo = month(time)
+dy = dayofmonth(time)
+hr = hour(time)
+min = minute(time)
+sec = second(time)
+
+// 转换月、日、时、分、秒为两位数格式
+mo_str = mo < 10 ? "0" + str.tostring(mo) : str.tostring(mo)
+dy_str = dy < 10 ? "0" + str.tostring(dy) : str.tostring(dy)
+hr_str = hr < 10 ? "0" + str.tostring(hr) : str.tostring(hr)
+min_str = min < 10 ? "0" + str.tostring(min) : str.tostring(min)
+
+// 组合成最终格式
+k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
+
+// =============== 网格交易状态变量 ===============
+// 用数组记录每批次的买入价格、数量和ID
+var float[] entry_prices = array.new_float(max_grids, 0.0)
+var float[] entry_quantities = array.new_float(max_grids, 0.0)
+var string[] entry_ids = array.new_string(max_grids, "")
+
+var float available_cash = strategy.initial_capital
+// 记录最后一次买入价格（用于计算下一个网格）
+var float last_entry_price = 0.0
+// 记录下一个网格买入价格
+var float next_grid_price = 0.0
+// 记录当前网格止盈价格
+var float current_grid_profit_price = 0.0
+// 记录当前活跃的网格
+var int next_slot = 0
+// 是否处于清仓状态
+var bool just_exited_all = false
+// 新增：等待下跌K线标志
+var bool waiting_for_decline = false
+
+// =============== 辅助函数 ===============
+// 计算可以买入的股数（必须是100的整数倍）
+calculate_shares(amount, price) =>
+    math.floor(amount / price / 100) * 100
+
+// 计算下一个网格买入点
+calculate_next_grid_price(last_price) =>
+    last_price * (1 - grid_drop_percent)
+
+// 变量重置
+if strategy.position_size == 0
+    next_slot := 0
+
+// =============== 入场和加仓条件 ===============
+// 空仓且在交易时间内
+entry_condition_1 = strategy.position_size == 0 and in_trading_timeframe
+// 没有在清仓期
+entry_condition_2 = not just_exited_all
+// 清仓后价格回落重入（新增：且已出现下跌K线）
+entry_condition_3 = just_exited_all and not waiting_for_decline
+
+initial_entry_condition = entry_condition_1 and (entry_condition_2 or entry_condition_3 or true)
+
+// 加仓条件（价格下跌至下一个网格点且活跃网格数小于最大值）
+add_position_condition = strategy.position_size > 0 and in_trading_timeframe and close <= next_grid_price and next_slot > 0 and next_slot < max_grids
+
+// =============== 执行策略 ===============
+// 初始建仓
+if initial_entry_condition
+    // 计算可以买入的股数
+    shares_to_buy = calculate_shares(initial_position_amount, close)
+    // 确保至少可以买入100股
+    if shares_to_buy >= 100 and available_cash >= shares_to_buy * close  
+        entryId = "初始建仓"
+
+        strategy.entry(entryId, strategy.long, qty=shares_to_buy, comment="初始建仓@" + str.tostring(close))
+        
+        // 记录这批次的买入信息
+        array.set(entry_prices, 0, close)
+        array.set(entry_quantities, 0, shares_to_buy)
+        array.set(entry_ids, 0, entryId)
+        
+        just_exited_all := false
+        // 记录现金余额
+        available_cash := available_cash - shares_to_buy * close
+        // 记录买入价格
+        last_entry_price := close
+        // 计算下一个网格价格
+        next_grid_price := calculate_next_grid_price(close)
+        // 递增网格
+        next_slot := next_slot + 1
+else if add_position_condition
+    // 计算加仓数量（当前持仓的10%，且必须是100的整数倍）
+    additional_shares = math.max(100, math.floor(strategy.position_size * grid_increase_percent / 100) * 100)
+    if additional_shares < 100
+        additional_shares := 100
+
+    // 网格加仓
+    if available_cash >= additional_shares * close
+        entryId = "网格加仓#" + str.tostring(next_slot)
+        strategy.entry(entryId, strategy.long, qty=additional_shares, comment = 
+         "网格加仓#" + str.tostring(next_slot) + "@" + str.tostring(close))
+        
+        // 记录这批次的买入信息
+        array.set(entry_prices, next_slot, close)
+        array.set(entry_quantities, next_slot, additional_shares)
+        array.set(entry_ids, next_slot, entryId)
+        
+        // 记录现金余额
+        available_cash := available_cash - additional_shares * close
+        // 更新最后一次买入价格
+        last_entry_price := close
+        // 计算下一个网格价格
+        next_grid_price := calculate_next_grid_price(close)
+        // 递增网格
+        next_slot := next_slot + 1
+
+// 如果有持仓，判断是否可以止盈
+if next_slot > 0
+    target_slot = next_slot - 1
+    // 获取该批次的信息
+    entry_price = array.get(entry_prices, target_slot)
+    entry_quantity = array.get(entry_quantities, target_slot)
+    entry_id = array.get(entry_ids, target_slot)
+    
+    // 计算该批次的止盈价格
+    current_grid_profit_price := entry_price * (1 + take_profit_percent)
+    
+    // 检查是否达到止盈条件
+    if close >= current_grid_profit_price
+        c = ""
+        if next_slot > 1
+            c:= "批次止盈#" + str.tostring(target_slot) +"@" + str.tostring(close)
+        else
+            c := "清仓@" + str.tostring(close)
+
+        // 平掉该批次的仓位
+        strategy.close(entry_id, qty=entry_quantity, comment=c)
+        // 更新现金余额
+        available_cash := available_cash + entry_quantity * close
+        // 恢复该网格
+        next_slot := next_slot - 1
+        
+        // 回到上一级网格价格
+        last_entry_price := close
+        next_grid_price := calculate_next_grid_price(last_entry_price)
+        
+
+        if next_slot > 0
+            // 对买入价进行调整，以响应实际卖出价
+            array.set(entry_prices, next_slot, close)
+        else
+            just_exited_all := true
+            waiting_for_decline := true
+
+// 新增：检测清仓后的第一根下跌K线
+if waiting_for_decline and close < open
+    waiting_for_decline := false
+
+// =============== 绘制价格线 ===============
+// 绘制下一个网格买入价
+plot(strategy.position_size > 0 ? next_grid_price : na, "下一网格买入价", color=color.new(color.blue, 0), style=plot.style_cross)
+plot(strategy.position_size > 0 ? last_entry_price : na, "当前网格买入价", color=color.new(color.gray, 0), style=plot.style_cross)
+plot(strategy.position_size > 0 ? current_grid_profit_price : na, "当前网格止盈价", color=color.new(color.red, 0), style=plot.style_cross)
+
+// =============== 信息显示 ===============
+var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
+
+label.set_xy(info, bar_index, high)
+label.set_text(info, "网格交易策略" + 
+     "\n\n价值：" + str.tostring(math.round(strategy.position_size * close)) + 
+     "\n现金流：" + str.tostring(math.round(available_cash)) + 
+     "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) + 
+     "\n持仓：" + str.tostring(strategy.position_size) +
+     "\nSlot：" + str.tostring(next_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)))
