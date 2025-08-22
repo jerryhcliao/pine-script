@@ -3,7 +3,7 @@
 strategy("网格交易策略 - A股 (改进版)", 
      overlay=true, 
      precision=2, 
-     initial_capital=200000, 
+     initial_capital=1000000, 
      pyramiding=40, 
      default_qty_type = strategy.fixed,
      margin_long=100,
@@ -19,8 +19,9 @@ initial_position_amount = input.float(60000, "初始建仓金额(元)", minval=1
 grid_drop_percent = input.float(5.0, "网格下跌百分比(%)", minval=1.0, step=0.5, group="网格设置") * 0.01
 take_profit_percent = input.float(10.0, "止盈百分比(%)", minval=1.0, step=0.5, group="网格设置") * 0.01
 grid_increase_percent = input.float(10.0, "加仓比例(%)", minval=1.0, step=1.0, group="网格设置") * 0.01
-max_reentry_drawdown = input.float(0.0, "清仓后最大回撤重入(%)", minval=0.0, step=0.5, group="网格设置") * 0.01
 max_grids = input.int(30, "最大网格层数", minval=1, maxval=40, group="网格设置")
+cooldown_period = input.int(8, "清仓后冷却K线数", minval=0, maxval=20, group="网格设置")
+reentry_discount = input.float(3.0, "提前重入回调幅度(%)", minval=1.0, step=0.5, group="网格设置") * 0.01
 
 // =============== A股特有设置 ===============
 five_year_limitation = input.bool(true, "仅在最近5年内交易", group="A股特有设置")
@@ -62,10 +63,12 @@ var float next_grid_price = 0.0
 var float current_grid_profit_price = 0.0
 // 记录当前活跃的网格
 var int next_slot = 0
-// 是否处于清仓状态
-var bool just_exited_all = false
-// 新增：等待下跌K线标志
-var bool waiting_for_decline = false
+// 时间冷却机制
+var int cooldown_bars = 0
+// 最后清仓价格
+var float last_exit_price = 0.0
+
+
 
 // =============== 辅助函数 ===============
 // 计算可以买入的股数（必须是100的整数倍）
@@ -81,14 +84,20 @@ if strategy.position_size == 0
     next_slot := 0
 
 // =============== 入场和加仓条件 ===============
+// 每根K线减少冷却计数器
+if cooldown_bars > 0
+    cooldown_bars := cooldown_bars - 1
+
 // 空仓且在交易时间内
 entry_condition_1 = strategy.position_size == 0 and in_trading_timeframe
-// 没有在清仓期
-entry_condition_2 = not just_exited_all
-// 清仓后价格回落重入（新增：且已出现下跌K线）
-entry_condition_3 = just_exited_all and not waiting_for_decline
 
-initial_entry_condition = entry_condition_1 and (entry_condition_2 or entry_condition_3 or true)
+// 冷却期已过 或者 价格回调足够大
+cooldown_finished = cooldown_bars <= 0
+price_dropped_enough = last_exit_price > 0 and close <= last_exit_price * (1 - reentry_discount)
+entry_condition_2 = cooldown_finished or price_dropped_enough
+
+// 组合条件（去掉了原来的 or true）
+initial_entry_condition = entry_condition_1 and entry_condition_2
 
 // 加仓条件（价格下跌至下一个网格点且活跃网格数小于最大值）
 add_position_condition = strategy.position_size > 0 and in_trading_timeframe and close <= next_grid_price and next_slot > 0 and next_slot < max_grids
@@ -102,14 +111,13 @@ if initial_entry_condition
     if shares_to_buy >= 100 and available_cash >= shares_to_buy * close  
         entryId = "初始建仓"
 
-        strategy.entry(entryId, strategy.long, qty=shares_to_buy, comment="初始建仓@" + str.tostring(close))
+        strategy.entry(entryId, strategy.long, qty=shares_to_buy, comment=syminfo.ticker + " 初始建仓@" + str.tostring(close))
         
         // 记录这批次的买入信息
         array.set(entry_prices, 0, close)
         array.set(entry_quantities, 0, shares_to_buy)
         array.set(entry_ids, 0, entryId)
         
-        just_exited_all := false
         // 记录现金余额
         available_cash := available_cash - shares_to_buy * close
         // 记录买入价格
@@ -128,7 +136,7 @@ else if add_position_condition
     if available_cash >= additional_shares * close
         entryId = "网格加仓#" + str.tostring(next_slot)
         strategy.entry(entryId, strategy.long, qty=additional_shares, comment = 
-         "网格加仓#" + str.tostring(next_slot) + "@" + str.tostring(close))
+         syminfo.ticker + " 网格加仓#" + str.tostring(next_slot) + "@" + str.tostring(close))
         
         // 记录这批次的买入信息
         array.set(entry_prices, next_slot, close)
@@ -159,9 +167,9 @@ if next_slot > 0
     if close >= current_grid_profit_price
         c = ""
         if next_slot > 1
-            c:= "批次止盈#" + str.tostring(target_slot) +"@" + str.tostring(close)
+            c:= syminfo.ticker + " 批次止盈#" + str.tostring(target_slot) +"@" + str.tostring(close)
         else
-            c := "清仓@" + str.tostring(close)
+            c := syminfo.ticker + " 清仓@" + str.tostring(close)
 
         // 平掉该批次的仓位
         strategy.close(entry_id, qty=entry_quantity, comment=c)
@@ -179,12 +187,8 @@ if next_slot > 0
             // 对买入价进行调整，以响应实际卖出价
             array.set(entry_prices, next_slot, close)
         else
-            just_exited_all := true
-            waiting_for_decline := true
-
-// 新增：检测清仓后的第一根下跌K线
-if waiting_for_decline and close < open
-    waiting_for_decline := false
+            cooldown_bars := cooldown_period
+            last_exit_price := close
 
 // =============== 绘制价格线 ===============
 // 绘制下一个网格买入价
