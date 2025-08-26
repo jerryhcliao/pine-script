@@ -139,11 +139,6 @@ if short_profit_exit and strategy.position_size < 0
 // 绘制KAMA均线
 plot(kama, color=color.blue, linewidth=2, title="KAMA")
 
-// 绘制止损价位线（只在有持仓时显示）
-stop_loss_color = strategy.position_size > 0 ? color.new(color.red, 0) : strategy.position_size < 0 ? color.new(color.green, 0) : na
-
-plot(strategy.position_size != 0 ? stop_price : na, color=stop_loss_color, linewidth=1, style=plot.style_stepline, title="Stop Loss")
-
 // =============== 信息显示 ===============
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
 label.set_xy(info, bar_index, high)
