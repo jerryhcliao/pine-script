@@ -4,39 +4,24 @@
 strategy("KAMA Strategy - Futures", 
      overlay=true, 
      precision=2, 
-     initial_capital=200000, 
+     initial_capital=800000, 
      pyramiding=0, 
      default_qty_type = strategy.fixed,
      margin_long=100,
      margin_short=100)
 
-// --- K线时间，方便调试 ---
-// 获取各个时间组件
-yr = year(time)
-mo = month(time)
-dy = dayofmonth(time)
-hr = hour(time)
-min = minute(time)
-sec = second(time)
-
-// 转换月、日、时、分、秒为两位数格式
-mo_str = mo < 10 ? "0" + str.tostring(mo) : str.tostring(mo)
-dy_str = dy < 10 ? "0" + str.tostring(dy) : str.tostring(dy)
-hr_str = hr < 10 ? "0" + str.tostring(hr) : str.tostring(hr)
-min_str = min < 10 ? "0" + str.tostring(min) : str.tostring(min)
-
-// 组合成最终格式
-k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
 
 // =============== 参数设置 ===============
 // KAMA参数
 kama_length = input.int(60, title="KAMA Length", minval=1)
-kama_fastend = input.float(0.6660, title="KAMA - Fast End", minval=0.01, maxval=1.0, step=0.01)
+kama_fastend = input.float(0.8660, title="KAMA - Fast End", minval=0.01, maxval=1.0, step=0.01)
 kama_slowend = input.float(0.0645, title="KAMA - Slow End", minval=0.01, maxval=0.2, step=0.01)
 
-// 计算KAMA斜率，使用线性回归来判断趋势强度
-kama_slope_length = input.int(10, title="KAMA斜率计算周期", minval=5, maxval=50, group="趋势判断")
-kama_min_slope = input.float(0.05, title="最小斜率阈值", minval=0.01, maxval=2.0, step=0.01, group="趋势判断")
+// 线性回归趋势强度参数
+trend_period = input.int(12, title="趋势强度检测周期", minval=6, maxval=60, group="趋势强度止盈")
+r2_exit_threshold = input.float(0.3, title="R²止盈阈值", minval=0.1, maxval=0.8, step=0.05, group="趋势强度止盈")
+slope_decay_period = input.int(6, title="斜率衰减检测周期", minval=3, maxval=60, group="趋势强度止盈")
+slope_decay_threshold = input.float(0.5, title="斜率衰减比例", minval=0.01, maxval=0.8, step=0.1, group="趋势强度止盈")
 
 // 仓位和风险参数
 risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") * 0.01
@@ -44,13 +29,52 @@ risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="
 // ATR参数
 atr_length = input.int(60, "ATR周期", minval=1, group="ATR设置")
 
-// 背离检测参数
-divergence_length = input.int(60, "背离检测周期", minval=5, group="背离设置")
+// ===============  工具函数 ===============
+// --- K线时间，方便调试 ---
+kTime() =>
+    // 获取各个时间组件
+    yr = year(time)
+    mo = month(time)
+    dy = dayofmonth(time)
+    hr = hour(time)
+    min = minute(time)
+    sec = second(time)
 
-// 计算5年的毫秒数 (5 * 365 * 24 * 60 * 60 * 1000)
-fiveYearsInMs = 5 * 365 * 24 * 60 * 60 * 1000
-// 是否在交易时间范围内
-in_trading_timeframe = time > (timenow - fiveYearsInMs)
+    // 转换月、日、时、分、秒为两位数格式
+    mo_str = mo < 10 ? "0" + str.tostring(mo) : str.tostring(mo)
+    dy_str = dy < 10 ? "0" + str.tostring(dy) : str.tostring(dy)
+    hr_str = hr < 10 ? "0" + str.tostring(hr) : str.tostring(hr)
+    min_str = min < 10 ? "0" + str.tostring(min) : str.tostring(min)
+
+    // 组合成最终格式
+    k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
+
+    k_formatted_time
+
+isInTradingTimeFrame() => 
+    // 计算5年的毫秒数 (5 * 365 * 24 * 60 * 60 * 1000)
+    fiveYearsInMs = 5 * 365 * 24 * 60 * 60 * 1000
+    // 是否在交易时间范围内
+    in_trading_timeframe = time > (timenow - fiveYearsInMs)
+
+    in_trading_timeframe
+
+// 计算KAMA的线性回归斜率和R²
+calcTrendStrength(src, length) =>
+    // 计算斜率
+    lr_current = ta.linreg(src, length, 0)
+    lr_previous = ta.linreg(src, length, 1)
+    slope = lr_current - lr_previous
+    
+    // 计算R²
+    correlation_coef = ta.correlation(src, bar_index, length)
+    r_squared = correlation_coef * correlation_coef
+    r_squared := math.max(0, math.min(1, r_squared))
+    
+    // 转换斜率为百分比
+    slope_pct = src > 0 ? (slope / src * 100) : 0
+    
+    [slope_pct, r_squared]
 
 // =============== 指标计算 ===============
 // 基础计算
@@ -72,18 +96,15 @@ kama := nz(kama[1]) + kama_smooth * (xPrice - nz(kama[1]))
 kama_rising = kama > kama[1]
 kama_falling = kama < kama[1]
 
-// =============== 背离检测 ===============
-// 顶背离：价格创新高但KAMA未创新高
-price_highest = ta.highest(high, divergence_length)
-kama_highest = ta.highest(kama, divergence_length)
-top_divergence = high == price_highest and kama < kama_highest and kama_falling
+// 获取当前趋势强度（斜率、R2）
+[current_slope, current_r2] = calcTrendStrength(close, trend_period)
 
-// 底背离：价格创新低但KAMA未创新低
-price_lowest = ta.lowest(low, divergence_length)
-kama_lowest = ta.lowest(kama, divergence_length)
-bottom_divergence = low == price_lowest and kama > kama_lowest and kama_rising
+// 计算斜率衰减情况
+slope_history = ta.sma(math.abs(current_slope), slope_decay_period)
+slope_abs = math.abs(current_slope)
+slope_is_decaying = slope_abs < (slope_history * slope_decay_threshold)
 
-// =============== 方向判断 ===============
+// =============== 交易信号 ===============
 // 交叉信号
 bullish_cross = close > kama
 bearish_cross = close < kama
@@ -104,12 +125,12 @@ var float stop_price = 0
 
 // =============== 入场条件检查 ===============
 // 多头入场：价格上穿KAMA且KAMA向上
-long_entry_condition = strategy.position_size == 0 and in_trading_timeframe and
-                      bullish_cross and kama_rising
+long_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
+                      bullish_cross and kama_rising and not slope_is_decaying
 
 // 空头入场：价格下穿KAMA且KAMA向下
-short_entry_condition = strategy.position_size == 0 and in_trading_timeframe and
-                       bearish_cross and kama_falling
+short_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
+                       bearish_cross and kama_falling and not slope_is_decaying
 
 // 多头入场
 if long_entry_condition
@@ -124,9 +145,11 @@ if short_entry_condition
     strategy.exit("Short_Stop_Loss", "Short", stop=stop_price, comment=syminfo.ticker + " 空单止损")
 
 // =============== 止盈条件检查 ===============
-// 止盈条件：反向交叉或背离
-long_profit_exit = strategy.position_size > 0 and (bearish_cross or top_divergence)
-short_profit_exit = strategy.position_size < 0 and (bullish_cross or bottom_divergence)
+// 不管方向，只要趋势强度衰减就止盈
+trend_strength_exit = current_r2 < r2_exit_threshold and slope_is_decaying
+
+long_profit_exit = strategy.position_size > 0 and (trend_strength_exit or bearish_cross)
+short_profit_exit = strategy.position_size < 0 and (trend_strength_exit or bullish_cross)
 
 // 执行止盈
 if long_profit_exit and strategy.position_size > 0
@@ -140,10 +163,16 @@ if short_profit_exit and strategy.position_size < 0
 plot(kama, color=color.blue, linewidth=2, title="KAMA")
 
 // =============== 信息显示 ===============
+// 趋势状态描述
+trend_status = current_r2 > r2_exit_threshold ? "强趋势" : "弱趋势"
+slope_status = slope_is_decaying ? "衰减" : "稳定"
+
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
 label.set_xy(info, bar_index, high)
 
-label.set_text(info, "单KAMA期货策略" + 
+label.set_text(info, "KAMA趋势强度策略" + 
      "\n权益：" + str.tostring(math.round(strategy.equity)) + 
      "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) +
-     "\n单笔风险：" + str.tostring(math.round(max_loss_amount)))
+     "\n斜率：" + str.tostring(current_slope, "#.##") + "%" +
+     "\nR²：" + str.tostring(current_r2, "#.##") +
+     "\n趋势：" + trend_status + " " + slope_status)
