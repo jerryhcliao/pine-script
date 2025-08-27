@@ -4,7 +4,7 @@
 strategy("KAMA Strategy - Futures", 
      overlay=true, 
      precision=2, 
-     initial_capital=800000, 
+     initial_capital=500000, 
      pyramiding=0, 
      default_qty_type = strategy.fixed,
      margin_long=100,
@@ -172,7 +172,9 @@ label.set_xy(info, bar_index, high)
 
 label.set_text(info, "KAMA趋势强度策略" + 
      "\n权益：" + str.tostring(math.round(strategy.equity)) + 
+     "\n持仓：" + str.tostring(math.round(strategy.position_size)) + 
      "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) +
-     "\n斜率：" + str.tostring(current_slope, "#.##") + "%" +
+     "\n斜率：" + str.tostring(slope_abs, "#.##") + "%" +
+     "\n斜率-SMA：" + str.tostring(slope_history, "#.##") + "%" +
      "\nR²：" + str.tostring(current_r2, "#.##") +
      "\n趋势：" + trend_status + " " + slope_status)
