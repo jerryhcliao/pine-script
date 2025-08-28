@@ -135,13 +135,13 @@ short_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() a
 // 多头入场
 if long_entry_condition
     stop_price := close - stop_points
-    strategy.entry("Long", strategy.long, position_size_plan, comment="多单@" + syminfo.ticker + " 开仓价:" + str.tostring(close, "#.##") + " 止损价:" + str.tostring(stop_price, "#.##"))
+    strategy.entry("Long", strategy.long, position_size_plan, comment="多单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##"))
     strategy.exit("Long_Stop_Loss", "Long", stop=stop_price, comment=syminfo.ticker + " 多单止损")
 
 // 空头入场
 if short_entry_condition
     stop_price := close + stop_points
-    strategy.entry("Short", strategy.short, position_size_plan, comment="空单@" + syminfo.ticker + " 开仓价:" + str.tostring(close, "#.##") + " 止损价:" + str.tostring(stop_price, "#.##"))
+    strategy.entry("Short", strategy.short, position_size_plan, comment="空单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##"))
     strategy.exit("Short_Stop_Loss", "Short", stop=stop_price, comment=syminfo.ticker + " 空单止损")
 
 // =============== 止盈条件检查 ===============
