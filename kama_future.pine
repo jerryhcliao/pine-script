@@ -25,9 +25,17 @@ slope_decay_threshold = input.float(0.5, title="斜率衰减比例", minval=0.01
 
 // 仓位和风险参数
 risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") * 0.01
+// 连续止损管理参数
+pause_days = input.int(30, title="暂停交易K 线数", minval=1, maxval=60, group="风险管理")
 
 // ATR参数
 atr_length = input.int(30, "ATR周期", minval=1, group="ATR设置")
+
+// =============== 连续止损管理变量 ===============
+var bool is_paused = false
+var int consecutive_losses = 0
+var int pause_start_bar = 0
+var int recovery_stage = 1  // 1=正常,  2=1/2仓位, 4=1/4仓位,
 
 // ===============  工具函数 ===============
 // --- K线时间，方便调试 ---
@@ -76,6 +84,32 @@ calcTrendStrength(src, length) =>
     
     [slope_pct, r_squared]
 
+// =============== 连续止损管理逻辑 ===============
+// 检测交易结果并更新状态
+if strategy.closedtrades > strategy.closedtrades[1]
+    last_trade_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    
+    if last_trade_profit > 0
+        // 盈利交易：重置计数器，根据当前阶段决定下一步
+        consecutive_losses := 0
+        recovery_stage := 1    
+    else
+        // 亏损交易：增加连续止损计数
+        consecutive_losses := consecutive_losses + 1
+        
+        // 检查是否需要暂停交易
+        if consecutive_losses >= 10
+            is_paused := true
+            pause_start_bar := bar_index
+        else if consecutive_losses >= 5
+            recovery_stage := 2
+
+// 检查暂停状态
+if is_paused and (bar_index - pause_start_bar) >= pause_days
+    is_paused := false
+    consecutive_losses := 9
+    recovery_stage := 1 
+
 // =============== 指标计算 ===============
 // 基础计算
 xPrice = close
@@ -116,8 +150,15 @@ stop_points = atr * 2
 // 单笔风险
 max_loss_amount = strategy.equity * risk_percent
 
-// 计算合适的仓位大小（手数）
-position_size_plan = math.floor(max_loss_amount / stop_points / syminfo.pointvalue)
+// 基础仓位大小（手数）
+base_position_size = math.floor(max_loss_amount / stop_points / syminfo.pointvalue)
+
+// 根据当前状态调整仓位
+position_size_plan = 
+     is_paused ? 0 :
+     recovery_stage == 2 ? math.floor(base_position_size * 0.5) :
+     recovery_stage == 4 ? math.floor(base_position_size * 0.25) :
+     base_position_size
 
 // =============== 止损变量 ===============
 // 止损价格
@@ -164,17 +205,23 @@ plot(kama, color=color.blue, linewidth=2, title="KAMA")
 
 // =============== 信息显示 ===============
 // 趋势状态描述
-trend_status = current_r2 > r2_exit_threshold ? "强趋势" : "弱趋势"
+trend_status = current_r2 > r2_exit_threshold ? "强" : "弱"
 slope_status = slope_is_decaying ? "衰减" : "稳定"
+
+// 风险管理状态描述
+risk_status = 
+  is_paused ? "暂停中(" + str.tostring(pause_days - (bar_index - pause_start_bar)) + "K)" :
+  recovery_stage == 2 ? "半仓(" + str.tostring(consecutive_losses) + "连停)" :
+  "正常"
 
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
 label.set_xy(info, bar_index, high)
 
 label.set_text(info, "KAMA趋势强度策略" + 
      "\n权益：" + str.tostring(math.round(strategy.equity)) + 
-     "\n持仓：" + str.tostring(math.round(strategy.position_size)) + 
      "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) +
+     "\n仓位管理：" + risk_status +
      "\n斜率：" + str.tostring(slope_abs, "#.##") + "%" +
      "\n斜率-SMA：" + str.tostring(slope_history, "#.##") + "%" +
      "\nR²：" + str.tostring(current_r2, "#.##") +
-     "\n趋势：" + trend_status + " " + slope_status)
+     "\n趋势：一致性-" + trend_status + " 斜率-" + slope_status)
