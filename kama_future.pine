@@ -5,6 +5,8 @@ strategy("KAMA Strategy - Futures",
      overlay=true, 
      precision=2, 
      initial_capital=500000, 
+     commission_type="percent",
+     commission_value=0.0001,
      pyramiding=0, 
      default_qty_type = strategy.fixed,
      margin_long=100,
@@ -15,10 +17,10 @@ strategy("KAMA Strategy - Futures",
 // KAMA参数
 kama_length = input.int(60, title="KAMA Length", minval=1)
 kama_fastend = input.float(0.8660, title="KAMA - Fast End", minval=0.01, maxval=1.0, step=0.01)
-kama_slowend = input.float(0.0645, title="KAMA - Slow End", minval=0.01, maxval=0.2, step=0.01)
+kama_slowend = input.float(0.0640, title="KAMA - Slow End", minval=0.01, maxval=0.2, step=0.01)
 
 // 线性回归趋势强度参数
-trend_period = input.int(18, title="趋势强度检测周期", minval=6, maxval=60, group="趋势强度止盈")
+trend_period = input.int(18, title="斜率检测周期", minval=6, maxval=60, group="趋势强度止盈")
 r2_exit_threshold = input.float(0.3, title="R²止盈阈值", minval=0.1, maxval=0.8, step=0.05, group="趋势强度止盈")
 slope_decay_period = input.int(12, title="斜率衰减检测周期", minval=3, maxval=60, group="趋势强度止盈")
 slope_decay_threshold = input.float(0.5, title="斜率衰减比例", minval=0.01, maxval=0.8, step=0.1, group="趋势强度止盈")
@@ -81,6 +83,9 @@ calcTrendStrength(src, length) =>
     
     // 转换斜率为百分比
     slope_pct = src > 0 ? (slope / src * 100) : 0
+
+    slope_pct := math.round(slope_pct, 3)
+    r_squared := math.round(r_squared, 3)
     
     [slope_pct, r_squared]
 
@@ -101,14 +106,16 @@ if strategy.closedtrades > strategy.closedtrades[1]
         if consecutive_losses >= 10
             is_paused := true
             pause_start_bar := bar_index
-        else if consecutive_losses >= 5
+        else if consecutive_losses >= 6
+            recovery_stage := 4
+        else if consecutive_losses >= 3
             recovery_stage := 2
 
 // 检查暂停状态
 if is_paused and (bar_index - pause_start_bar) >= pause_days
     is_paused := false
     consecutive_losses := 9
-    recovery_stage := 1 
+    recovery_stage := 4
 
 // =============== 指标计算 ===============
 // 基础计算
@@ -132,11 +139,15 @@ kama_falling = kama < kama[1]
 
 // 获取当前趋势强度（斜率、R2）
 [current_slope, current_r2] = calcTrendStrength(close, trend_period)
+// 计算 KAMA 斜率
+[kama_slope, kama_r2] = calcTrendStrength(kama, 30)
 
 // 计算斜率衰减情况
 slope_history = ta.sma(math.abs(current_slope), slope_decay_period)
 slope_abs = math.abs(current_slope)
 slope_is_decaying = slope_abs < (slope_history * slope_decay_threshold)
+
+kama_slope_abs = math.abs(kama_slope)
 
 // =============== 交易信号 ===============
 // 交叉信号
@@ -167,22 +178,22 @@ var float stop_price = 0
 // =============== 入场条件检查 ===============
 // 多头入场：价格上穿KAMA且KAMA向上
 long_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
-                      bullish_cross and kama_rising and not slope_is_decaying
+                      bullish_cross and kama_rising and not slope_is_decaying and kama_slope_abs > 0
 
 // 空头入场：价格下穿KAMA且KAMA向下
 short_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
-                       bearish_cross and kama_falling and not slope_is_decaying
+                       bearish_cross and kama_falling and not slope_is_decaying and kama_slope_abs > 0
 
 // 多头入场
 if long_entry_condition
-    stop_price := close - stop_points
-    strategy.entry("Long", strategy.long, position_size_plan, comment="多单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##"))
+    stop_price := math.ceil(close - stop_points)
+    strategy.entry("Long", strategy.long, position_size_plan, comment="多单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##") + " KAMA斜率:" + str.tostring(kama_slope, "#.##") + "% R²:" + str.tostring(kama_r2, "#.##"))
     strategy.exit("Long_Stop_Loss", "Long", stop=stop_price, comment=syminfo.ticker + " 多单止损")
 
 // 空头入场
 if short_entry_condition
-    stop_price := close + stop_points
-    strategy.entry("Short", strategy.short, position_size_plan, comment="空单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##"))
+    stop_price := math.floor(close + stop_points)
+    strategy.entry("Short", strategy.short, position_size_plan, comment="空单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##") + " KAMA斜率:" + str.tostring(kama_slope, "#.##") + "% R²:" + str.tostring(kama_r2, "#.##"))
     strategy.exit("Short_Stop_Loss", "Short", stop=stop_price, comment=syminfo.ticker + " 空单止损")
 
 // =============== 止盈条件检查 ===============
@@ -211,8 +222,9 @@ slope_status = slope_is_decaying ? "衰减" : "稳定"
 // 风险管理状态描述
 risk_status = 
   is_paused ? "暂停中(" + str.tostring(pause_days - (bar_index - pause_start_bar)) + "K)" :
-  recovery_stage == 2 ? "半仓(" + str.tostring(consecutive_losses) + "连停)" :
-  "正常"
+  recovery_stage == 2 ? "1/2仓(" + str.tostring(consecutive_losses) + "连损)" :
+  recovery_stage == 4 ? "1/4仓(" + str.tostring(consecutive_losses) + "连损)" :
+  "正常(" + str.tostring(consecutive_losses) + "连损)"
 
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
 label.set_xy(info, bar_index, high)

@@ -73,6 +73,8 @@ var int next_slot = 0
 var int cooldown_bars = 0
 // 最后清仓价格
 var float last_exit_price = 0.0
+// 最大资金占用记录
+var float max_capital_used = 0.0
 
 
 
@@ -99,6 +101,14 @@ calculate_additional_shares(current_position_size, current_slot) =>
     increase_percent = current_slot < 5 ? early_grid_increase_percent : late_grid_increase_percent
     additional_shares = math.max(100, math.floor(current_position_size * increase_percent / 100) * 100)
     additional_shares < 100 ? 100 : additional_shares
+
+// 计算当前所有持仓的总成本
+calculate_total_capital_used() =>
+    total_cost = 0.0
+    for i = 0 to next_slot - 1
+        if array.get(entry_quantities, i) > 0
+            total_cost := total_cost + array.get(entry_quantities, i) * array.get(entry_prices, i)
+    total_cost
 
 // 变量重置
 if strategy.position_size == 0
@@ -147,6 +157,10 @@ if initial_entry_condition
         next_grid_price := calculate_next_grid_price(close, next_slot)
         // 递增网格
         next_slot := next_slot + 1
+        
+        // 更新最大资金占用
+        current_capital_used = calculate_total_capital_used()
+        max_capital_used := math.max(max_capital_used, current_capital_used)
 else if add_position_condition
     // 计算加仓数量（根据当前网格层数使用不同加仓比例）
     additional_shares = calculate_additional_shares(strategy.position_size, next_slot)
@@ -170,6 +184,10 @@ else if add_position_condition
         next_grid_price := calculate_next_grid_price(close, next_slot)
         // 递增网格
         next_slot := next_slot + 1
+        
+        // 更新最大资金占用
+        current_capital_used = calculate_total_capital_used()
+        max_capital_used := math.max(max_capital_used, current_capital_used)
 
 // 如果有持仓，判断是否可以止盈
 if next_slot > 0
@@ -224,4 +242,5 @@ label.set_text(info, "网格交易策略" +
      "\n现金流：" + str.tostring(math.round(available_cash)) + 
      "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) + 
      "\n持仓：" + str.tostring(strategy.position_size) +
-     "\nSlot：" + str.tostring(next_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)))
+     "\nSlot：" + str.tostring(next_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
+     "\n最大资金占用：" + str.tostring(math.round(max_capital_used)))
