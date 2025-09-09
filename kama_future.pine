@@ -21,17 +21,26 @@ kama_slowend = input.float(0.0640, title="KAMA - Slow End", minval=0.01, maxval=
 
 // 线性回归趋势强度参数
 trend_period = input.int(18, title="斜率检测周期", minval=6, maxval=60, group="趋势强度止盈")
-r2_exit_threshold = input.float(0.3, title="R²止盈阈值", minval=0.1, maxval=0.8, step=0.05, group="趋势强度止盈")
+r2_exit_threshold = input.float(0.55, title="R²止盈阈值", minval=0.1, maxval=0.8, step=0.05, group="趋势强度止盈")
 slope_decay_period = input.int(12, title="斜率衰减检测周期", minval=3, maxval=60, group="趋势强度止盈")
 slope_decay_threshold = input.float(0.5, title="斜率衰减比例", minval=0.01, maxval=0.8, step=0.1, group="趋势强度止盈")
+
+// 新增：趋势确认参数
+trend_confirm_bars = input.int(3, title="趋势确认K线数", minval=2, maxval=5, group="趋势过滤")
+kama_slope_threshold = input.float(0.008, title="KAMA斜率阈值", minval=0.001, maxval=0.02, step=0.001, group="趋势过滤")
+min_atr_ratio = input.float(0.5, title="最小ATR比例", minval=0.1, maxval=1.0, step=0.1, group="趋势过滤")
 
 // 仓位和风险参数
 risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") * 0.01
 // 连续止损管理参数
-pause_days = input.int(30, title="暂停交易K 线数", minval=1, maxval=60, group="风险管理")
+pause_days = input.int(50, title="暂停交易K 线数", minval=1, maxval=60, group="风险管理")
+consecutive_loss_threshold_1 = input.int(5, title="首次减仓阈值", minval=3, maxval=10, group="风险管理")
+consecutive_loss_threshold_2 = input.int(8, title="二次减仓阈值", minval=5, maxval=15, group="风险管理")
+consecutive_loss_threshold_3 = input.int(12, title="暂停交易阈值", minval=8, maxval=20, group="风险管理")
 
 // ATR参数
 atr_length = input.int(30, "ATR周期", minval=1, group="ATR设置")
+stop_atr_multiplier = input.float(2.8, "止损ATR倍数", minval=1.5, maxval=4.0, step=0.1, group="ATR设置")
 
 // =============== 连续止损管理变量 ===============
 var bool is_paused = false
@@ -103,12 +112,12 @@ if strategy.closedtrades > strategy.closedtrades[1]
         consecutive_losses := consecutive_losses + 1
         
         // 检查是否需要暂停交易
-        if consecutive_losses >= 10
+        if consecutive_losses >= consecutive_loss_threshold_3
             is_paused := true
             pause_start_bar := bar_index
-        else if consecutive_losses >= 6
+        else if consecutive_losses >= consecutive_loss_threshold_2
             recovery_stage := 4
-        else if consecutive_losses >= 3
+        else if consecutive_losses >= consecutive_loss_threshold_1
             recovery_stage := 2
 
 // 检查暂停状态
@@ -149,6 +158,17 @@ slope_is_decaying = slope_abs < (slope_history * slope_decay_threshold)
 
 kama_slope_abs = math.abs(kama_slope)
 
+// 新增：趋势确认逻辑
+kama_rising_confirmed = kama_rising and kama[1] > kama[2] and kama[2] > kama[3]
+kama_falling_confirmed = kama_falling and kama[1] < kama[2] and kama[2] < kama[3]
+
+// 新增：市场状态判断
+atr_ratio = atr / ta.sma(atr, 20)
+market_volatile = atr_ratio >= min_atr_ratio
+
+// 新增：强趋势判断
+strong_trend = current_r2 > 0.6 and kama_slope_abs > 0.01
+
 // =============== 交易信号 ===============
 // 交叉信号
 bullish_cross = close > kama
@@ -156,7 +176,7 @@ bearish_cross = close < kama
 
 // =============== 仓位计算 ==============
 // 计算止损点数
-stop_points = atr * 2
+stop_points = atr * stop_atr_multiplier
 
 // 单笔风险
 max_loss_amount = strategy.equity * risk_percent
@@ -176,13 +196,15 @@ position_size_plan =
 var float stop_price = 0
 
 // =============== 入场条件检查 ===============
-// 多头入场：价格上穿KAMA且KAMA向上
+// 多头入场：价格上穿KAMA且KAMA向上，增加趋势确认和市场状态过滤
 long_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
-                      bullish_cross and kama_rising and not slope_is_decaying and kama_slope_abs > 0
+                      bullish_cross and kama_rising_confirmed and not slope_is_decaying and 
+                      kama_slope_abs >= kama_slope_threshold and market_volatile
 
-// 空头入场：价格下穿KAMA且KAMA向下
+// 空头入场：价格下穿KAMA且KAMA向下，增加趋势确认和市场状态过滤
 short_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
-                       bearish_cross and kama_falling and not slope_is_decaying and kama_slope_abs > 0
+                       bearish_cross and kama_falling_confirmed and not slope_is_decaying and 
+                       kama_slope_abs >= kama_slope_threshold and market_volatile
 
 // 多头入场
 if long_entry_condition
@@ -197,11 +219,20 @@ if short_entry_condition
     strategy.exit("Short_Stop_Loss", "Short", stop=stop_price, comment=syminfo.ticker + " 空单止损")
 
 // =============== 止盈条件检查 ===============
-// 不管方向，只要趋势强度衰减就止盈
-trend_strength_exit = current_r2 < r2_exit_threshold and slope_is_decaying
+// 优化止盈逻辑：在强趋势中让利润奔跑，在弱趋势中及时止盈
+weak_trend_exit = current_r2 < r2_exit_threshold and slope_is_decaying
+strong_trend_exit = current_r2 < 0.3 and slope_is_decaying  // 强趋势中的更严格止盈条件
 
-long_profit_exit = strategy.position_size > 0 and (trend_strength_exit or bearish_cross)
-short_profit_exit = strategy.position_size < 0 and (trend_strength_exit or bullish_cross)
+// 根据趋势强度调整止盈策略
+long_profit_exit = strategy.position_size > 0 and (
+                   (strong_trend and strong_trend_exit) or 
+                   (not strong_trend and weak_trend_exit) or 
+                   bearish_cross)
+
+short_profit_exit = strategy.position_size < 0 and (
+                    (strong_trend and strong_trend_exit) or 
+                    (not strong_trend and weak_trend_exit) or 
+                    bullish_cross)
 
 // 执行止盈
 if long_profit_exit and strategy.position_size > 0
@@ -226,14 +257,20 @@ risk_status =
   recovery_stage == 4 ? "1/4仓(" + str.tostring(consecutive_losses) + "连损)" :
   "正常(" + str.tostring(consecutive_losses) + "连损)"
 
+// 新增：市场状态描述
+market_status = market_volatile ? "高波动" : "低波动"
+trend_strength_status = strong_trend ? "强趋势" : "弱趋势"
+
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
 label.set_xy(info, bar_index, high)
 
-label.set_text(info, "KAMA趋势强度策略" + 
+label.set_text(info, "KAMA趋势强度策略(优化版)" + 
      "\n权益：" + str.tostring(math.round(strategy.equity)) + 
      "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) +
      "\n仓位管理：" + risk_status +
+     "\n市场状态：" + market_status + " " + trend_strength_status +
      "\n斜率：" + str.tostring(slope_abs, "#.##") + "%" +
      "\n斜率-SMA：" + str.tostring(slope_history, "#.##") + "%" +
      "\nR²：" + str.tostring(current_r2, "#.##") +
-     "\n趋势：一致性-" + trend_status + " 斜率-" + slope_status)
+     "\n趋势：一致性-" + trend_status + " 斜率-" + slope_status +
+     "\nKAMA斜率：" + str.tostring(kama_slope_abs, "#.##") + "%")
