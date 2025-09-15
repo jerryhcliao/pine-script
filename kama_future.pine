@@ -11,37 +11,127 @@ strategy("KAMA Strategy - Futures",
      margin_long=100,
      margin_short=100)
 
+// =============== 常量定义 ===============
+// 恢复阶段枚举
+var string RECOVERY_NORMAL = "NORMAL"
+var string RECOVERY_REDUCED_80 = "REDUCED_80"
+var string RECOVERY_REDUCED_60 = "REDUCED_60"
+var string RECOVERY_REDUCED_40 = "REDUCED_40"
+var string RECOVERY_REDUCED_20 = "REDUCED_20"
+var string RECOVERY_MINIMAL = "MINIMAL"
 
-// =============== 参数设置 ===============
+// 市场状态枚举
+var string MARKET_SIDEWAYS = "SIDEWAYS"
+var string MARKET_TRENDING = "TRENDING"
+
+// 交易方向枚举
+var string DIRECTION_LONG = "LONG"
+var string DIRECTION_SHORT = "SHORT"
+
+// =============== 常量设置 ===============
 // KAMA参数
-kama_length = input.int(60, title="KAMA Length", minval=1)
-kama_fastend = input.float(0.8660, title="KAMA - Fast End", minval=0.01, maxval=1.0, step=0.01)
-kama_slowend = input.float(0.0640, title="KAMA - Slow End", minval=0.01, maxval=0.2, step=0.01)
+kama_length = 80                    // KAMA Length
+kama_fastend = 0.866                // KAMA - Fast End
+kama_slowend = 0.060                // KAMA - Slow End
+
+// 入场阈值参数
+min_slope_threshold = 0.100          // 最小斜率阈值(%)
+
+// 止盈止损参数
+// 初始止损说明：
+// - 2.5倍ATR：在震荡行情中减少频繁止损，给趋势更多发展空间
+// - 1.5-2.0倍：容易在震荡中频繁触发，适合强趋势市场
+// - 3.0-4.0倍：止损过宽，单笔损失可能过大
+initial_stop_atr_mult = 2.5         // 初始止损ATR倍数
+profit_target_1_atr = 1.5           // 第一阶段止盈ATR倍数
+partial_exit_ratio = 0.5            // 第一阶段止盈比例
+trailing_stop_atr_mult = 1.5        // 移动止损ATR倍数
 
 // 线性回归趋势强度参数
-trend_period = input.int(18, title="斜率检测周期", minval=6, maxval=60, group="趋势强度止盈")
-r2_exit_threshold = input.float(0.3, title="R²止盈阈值", minval=0.1, maxval=0.8, step=0.05, group="趋势强度止盈")
-slope_decay_period = input.int(12, title="斜率衰减检测周期", minval=3, maxval=60, group="趋势强度止盈")
-slope_decay_threshold = input.float(0.5, title="斜率衰减比例", minval=0.01, maxval=0.8, step=0.1, group="趋势强度止盈")
+trend_period = 18                   // 斜率检测周期
+// R²止盈阈值说明：
+// - 当R² < 0.3时，认为趋势强度不足，触发止盈
+// - 0.3是经过优化的平衡值：既能捕捉到有效趋势，又不会过于严格
+// - 金融市场中R²=0.3已表示30%的价格变化可用线性趋势解释，属于中等强度趋势
+// - 设置过高(如0.8)会错过很多交易机会，设置过低(如0.1)会产生过多假信号
+r2_exit_threshold = 0.3             // R²止盈阈值
+slope_decay_period = 12             // 斜率衰减检测周期
+slope_decay_threshold = 0.5         // 斜率衰减比例
 
 // 仓位和风险参数
-risk_percent = input.float(2.0, "风险比例(%)", minval=1, maxval=100, group="风险管理") * 0.01
+base_risk_percent = 0.02            // 基础风险比例(%)
+max_risk_percent = 0.05             // 最大风险比例(%)
+min_risk_percent = 0.005            // 最小风险比例(%)
+
 // 连续止损管理参数
-pause_days = input.int(30, title="暂停交易K 线数", minval=1, maxval=60, group="风险管理")
+pause_days = 30                     // 暂停交易K 线数
+max_drawdown_percent = 0.15         // 最大回撤阈值(%)
+
+// 市场状态识别参数
+adx_length = 14                     // ADX周期
+adx_threshold = 25                  // ADX趋势阈值
+volatility_length = 20              // 波动性检测周期
 
 // ATR参数
-atr_length = input.int(30, "ATR周期", minval=1, group="ATR设置")
+atr_length = 30                     // ATR周期
 
-// =============== 连续止损管理变量 ===============
-var bool is_paused = false
-var int consecutive_losses = 0
-var int pause_start_bar = 0
-var int recovery_stage = 1  // 1=正常,  2=1/2仓位, 4=1/4仓位,
+// =============== 自定义类型定义 ===============
+// 市场状态类型（包含所有计算指标）
+type MarketProfile
+    string market_state               // 当前市场状态（震荡市/趋势市，影响风险调整）
+    float adx_value                   // ADX值
+    float volatility_ratio            // 波动性比率
+    float kama                        // KAMA指标值
+    float atr                         // ATR值
+    float current_slope               // 当前价格斜率
+    float current_r2                  // 当前价格R²
+    float kama_slope                  // KAMA斜率
+    float kama_r2                     // KAMA R²
+    float slope_history               // 斜率历史平均值
+    float slope_abs                   // 当前斜率绝对值
+    bool slope_is_decaying            // 斜率是否衰减
+    float kama_slope_abs              // KAMA斜率绝对值
 
-// ===============  工具函数 ===============
-// --- K线时间，方便调试 ---
-kTime() =>
-    // 获取各个时间组件
+// 交易执行类型
+type ExecutionProfile
+    float stop_price                  // 当前止损价格
+    float entry_price                 // 入场价格（用于计算盈亏）
+    float highest_profit              // 最高盈利（多头仓位使用）
+    float lowest_profit               // 最低盈利（空头仓位使用）
+    bool partial_exit_done            // 是否已完成部分止盈
+    bool trailing_stop_activated      // 移动止损是否已激活
+
+// 交易条件类型（包含所有交易决策和风险管理数据）
+type ConditionProfile
+    // 交易决策数据
+    float risk_percent                // 风险比例
+    int position_size                 // 仓位大小
+    float stop_points                 // 止损点数
+    bool long_condition               // 多头入场条件
+    bool short_condition              // 空头入场条件
+    
+    // 风险管理数据
+    bool is_paused                    // 是否暂停交易（因连续亏损或回撤过大）
+    int consecutive_losses            // 连续亏损次数（用于仓位管理）
+    int pause_start_bar               // 暂停开始的K线索引（用于计算暂停时长）
+    string recovery_stage             // 恢复阶段（决定仓位大小：正常/0.8/0.6/0.4/0.2）
+    float peak_equity                 // 权益峰值（用于计算最大回撤）
+    bool drawdown_paused              // 是否因回撤过大而暂停交易
+
+// =============== 全局变量声明 ===============
+var MarketProfile marketProfile = na
+var ExecutionProfile executionProfile = na
+var ConditionProfile conditionProfile = na
+
+// =============== 变量初始化 ===============
+if barstate.isfirst
+    marketProfile := MarketProfile.new(MARKET_SIDEWAYS, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, 0.0)
+    executionProfile := ExecutionProfile.new(0.0, 0.0, 0.0, 0.0, false, false)
+    conditionProfile := ConditionProfile.new(0.0, 0, 0.0, false, false, false, 0, 0, RECOVERY_NORMAL, 0.0, false)
+
+// =============== 基础工具函数 ===============
+// 获取格式化的K线时间
+getFormattedTime() =>
     yr = year(time)
     mo = month(time)
     dy = dayofmonth(time)
@@ -49,191 +139,440 @@ kTime() =>
     min = minute(time)
     sec = second(time)
 
-    // 转换月、日、时、分、秒为两位数格式
     mo_str = mo < 10 ? "0" + str.tostring(mo) : str.tostring(mo)
     dy_str = dy < 10 ? "0" + str.tostring(dy) : str.tostring(dy)
     hr_str = hr < 10 ? "0" + str.tostring(hr) : str.tostring(hr)
     min_str = min < 10 ? "0" + str.tostring(min) : str.tostring(min)
 
-    // 组合成最终格式
-    k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
+    str.tostring(yr) + mo_str + dy_str + hr_str + min_str
 
-    k_formatted_time
+logOpen() =>
+    false
+    // getFormattedTime() == "202507251400"
 
+// 检查是否在交易时间范围内
 isInTradingTimeFrame() => 
-    // 计算5年的毫秒数 (5 * 365 * 24 * 60 * 60 * 1000)
     fiveYearsInMs = 5 * 365 * 24 * 60 * 60 * 1000
-    // 是否在交易时间范围内
-    in_trading_timeframe = time > (timenow - fiveYearsInMs)
+    time > (timenow - fiveYearsInMs)
 
-    in_trading_timeframe
+// =============== 基础计算函数 ===============
+// 计算KAMA指标
+calcKAMA() =>
+    xPrice = close
+    xvnoise = math.abs(xPrice - xPrice[1])
+    nsignal = math.abs(xPrice - xPrice[kama_length])
+    nnoise = math.sum(xvnoise, kama_length)
+    nefratio = nnoise != 0 ? nsignal / nnoise : 0
 
-// 计算KAMA的线性回归斜率和R²
+    var float kama = 0.0
+    kama_smooth = math.pow(nefratio * (kama_fastend - kama_slowend) + kama_slowend, 2)
+    kama := nz(kama[1]) + kama_smooth * (xPrice - nz(kama[1]))
+
+    kama
+
+// 检查所有指标数据是否就绪（防止在回测初期获取不存在的价格）
+isAllDataReady() =>
+    // 计算所有指标所需的最大历史数据周期
+    max_period = math.max(kama_length, trend_period, slope_decay_period, adx_length, volatility_length)
+    
+    // 检查是否有足够的K线数据来计算所有指标
+    // 需要至少max_period根K线才能正确计算所有指标
+    bar_index >= max_period
+    
+// 计算趋势强度（斜率和R²）
+// 输入：src=价格数据, length=计算周期
+// 输出：[斜率百分比, R²决定系数]
 calcTrendStrength(src, length) =>
-    // 计算斜率
+    // 计算当前K线的线性回归值（基于过去length根K线）
     lr_current = ta.linreg(src, length, 0)
+    
+    // 计算前一根K线的线性回归值（用于计算斜率变化）
     lr_previous = ta.linreg(src, length, 1)
+    
+    // 计算斜率：当前回归值 - 前一根回归值
+    // 正值表示上升趋势，负值表示下降趋势
     slope = lr_current - lr_previous
     
-    // 计算R²
+    // 计算价格与时间的相关系数（衡量线性关系的强度）
+    // bar_index是时间轴，src是价格轴
     correlation_coef = ta.correlation(src, bar_index, length)
+    
+    // 将相关系数平方得到R²（决定系数）
+    // R²表示价格变化中有多少比例可以用线性趋势解释
     r_squared = correlation_coef * correlation_coef
+    
+    // 确保R²在0-1范围内（防止计算误差）
     r_squared := math.max(0, math.min(1, r_squared))
     
-    // 转换斜率为百分比
+    // 将斜率转换为百分比形式，便于理解和比较
+    // 如果src为0则设为0，避免除零错误
     slope_pct = src > 0 ? (slope / src * 100) : 0
 
+    // 保留3位小数，提高精度
     slope_pct := math.round(slope_pct, 3)
     r_squared := math.round(r_squared, 3)
     
+    // 返回：斜率百分比和R²值
     [slope_pct, r_squared]
 
-// =============== 连续止损管理逻辑 ===============
-// 检测交易结果并更新状态
-if strategy.closedtrades > strategy.closedtrades[1]
-    last_trade_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+// =============== 中间层计算函数 ===============
+// 检测市场状态（判断当前是趋势市还是震荡市）
+detectMarketState(current_r2) =>
+    // 计算ADX指标（平均方向指数），用于判断趋势强度
+    // diplus: +DI（正向指标），diminus: -DI（负向指标），adx_value: ADX值
+    [diplus, diminus, adx_value] = ta.dmi(adx_length, 14)
     
-    if last_trade_profit > 0
-        // 盈利交易：重置计数器，根据当前阶段决定下一步
-        consecutive_losses := 0
-        recovery_stage := 1    
+    // 计算价格变化幅度（每根K线的价格变化绝对值）
+    price_changes = math.abs(close - close[1])
+    
+    // 计算价格变化的标准差（衡量价格波动的离散程度）
+    volatility = ta.stdev(price_changes, volatility_length)
+    
+    // 计算波动性的移动平均值（作为基准波动性）
+    avg_volatility = ta.sma(volatility, volatility_length)
+    
+    // 计算当前波动性相对于平均波动性的比率
+    // 比率 > 1 表示当前波动性高于平均水平，< 1 表示低于平均水平
+    volatility_ratio = avg_volatility > 0 ? volatility / avg_volatility : 1
+    
+    // 判断是否为趋势市：ADX值超过阈值 且 R²值大于0.3（表示价格与时间有较强线性关系）
+    is_trending = adx_value > adx_threshold and current_r2 > 0.3
+    
+    // 判断是否为高波动市：当前波动性比平均水平高20%以上
+    is_volatile = volatility_ratio > 1.2
+    
+    // 综合判断市场状态：
+    // - 趋势市：有明确趋势且波动性不高（适合趋势跟踪策略）
+    // - 震荡市：无明确趋势或波动性过高（适合区间交易策略）
+    market_state_value = is_trending and not is_volatile ? MARKET_TRENDING : MARKET_SIDEWAYS
+    
+    // 返回：市场状态、ADX值、波动性比率
+    [market_state_value, adx_value, volatility_ratio]
+
+// =============== 复合计算函数 ===============
+// 计算风险调整因子（动态调整仓位大小的核心函数）
+calcRiskAdjustmentFactor(current_r2) =>
+    // 1. 根据连续亏损情况调整风险因子（仓位管理）
+    // 连续亏损越多，仓位越小，保护资金
+    risk_factor = 
+         conditionProfile.recovery_stage == RECOVERY_NORMAL ? 1.0 :      // 正常：100%仓位
+         conditionProfile.recovery_stage == RECOVERY_REDUCED_80 ? 0.8 :  // 3次连损：80%仓位
+         conditionProfile.recovery_stage == RECOVERY_REDUCED_60 ? 0.6 :  // 6次连损：60%仓位
+         conditionProfile.recovery_stage == RECOVERY_REDUCED_40 ? 0.4 :  // 9次连损：40%仓位
+         conditionProfile.recovery_stage == RECOVERY_REDUCED_20 ? 0.2 :  // 12次连损：20%仓位
+         0.1                                                             // 极端情况：10%仓位
+    
+    // 2. 根据市场状态调整风险因子（趋势市 vs 震荡市）
+    // 趋势市：增加20%仓位（因为趋势明确，盈利概率高）
+    // 震荡市：减少20%仓位（因为市场不稳定，需要谨慎）
+    market_adjustment = marketProfile.market_state == MARKET_TRENDING ? 1.2 : 0.8
+    
+    // 3. 根据当前趋势强度调整风险因子（R²质量判断）
+    // 强趋势(R²>0.5)：增加50%仓位（趋势质量高，盈利概率大）
+    // 中等趋势(R²>0.3)：保持正常仓位
+    // 弱趋势(R²<0.3)：减少20%仓位（趋势质量低，需要谨慎）
+    trend_strength_adjustment = current_r2 > 0.5 ? 1.5 : (current_r2 > 0.3 ? 1.0 : 0.8)
+    
+    // 4. 计算当前回撤比例（相对于历史最高权益的损失程度）
+    // 公式：(历史最高权益 - 当前权益) / 历史最高权益
+    // 例如：权益从100万跌到90万，回撤 = (100-90)/100 = 10%
+    current_drawdown = (conditionProfile.peak_equity - strategy.equity) / conditionProfile.peak_equity
+    
+    // 5. 根据回撤程度进一步调整风险因子（回撤保护）
+    // 当回撤超过最大回撤阈值的一半时，将仓位减半
+    // 例如：最大回撤阈值15%，当回撤>7.5%时，仓位减半
+    // drawdown_adjustment = current_drawdown > max_drawdown_percent * 0.5 ? 0.5 : 1.0
+    drawdown_adjustment = 1
+
+    // 6. 综合计算最终风险比例（多重保护机制）
+    // 基础风险 × 连损调整 × 市场调整 × 趋势强度调整 × 回撤调整
+    // 然后限制在最小和最大风险范围内
+    math.max(min_risk_percent, math.min(max_risk_percent, base_risk_percent * risk_factor * market_adjustment * trend_strength_adjustment * drawdown_adjustment))
+
+// 计算仓位大小（整合动态止损调整）
+calcPositionSize(risk_percent, atr, current_r2) =>
+    stop_points = atr * initial_stop_atr_mult
+    
+    max_loss_amount = strategy.equity * risk_percent
+    position_size = math.floor(max_loss_amount / stop_points / syminfo.pointvalue)
+
+    [position_size, stop_points]
+
+// 检查入场条件（整合市场状态和趋势强度判断）
+checkEntryConditions(kama, kama_slope_abs, slope_is_decaying, current_r2) =>
+    // 首先检查所有指标数据是否就绪（防止在回测初期获取不存在的价格）
+    if not isAllDataReady()
+        [false, false]
     else
-        // 亏损交易：增加连续止损计数
-        consecutive_losses := consecutive_losses + 1
+        // 基础技术指标
+        bullish_cross = close > kama
+        bearish_cross = close < kama
+        kama_rising = kama > kama[1]
+        kama_falling = kama < kama[1]
+
+        // 综合信号质量过滤（统一的市场环境和趋势质量判断）
+        // 情况1：趋势市 + 基础趋势质量(R²>0.3) → 允许交易
+        // 情况2：震荡市 + 强趋势信号(R²>0.4) → 允许交易
+        // 所有情况都需要：斜率未衰减
+        signal_quality_condition = 
+             (marketProfile.market_state == MARKET_TRENDING and current_r2 > 0.3) or  // 趋势市：标准质量
+             (marketProfile.market_state == MARKET_SIDEWAYS and current_r2 > 0.4)     // 震荡市：高质量要求
         
-        // 检查是否需要暂停交易
-        if consecutive_losses >= 10
-            is_paused := true
-            pause_start_bar := bar_index
-        else if consecutive_losses >= 6
-            recovery_stage := 4
-        else if consecutive_losses >= 3
-            recovery_stage := 2
+        // 趋势持续性过滤（确保趋势未衰减）
+        trend_continuity_condition = not slope_is_decaying
+        
+        // 综合入场条件
+        long_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
+                         bullish_cross and kama_rising and 
+                         signal_quality_condition and trend_continuity_condition and 
+                         kama_slope_abs >= min_slope_threshold
+        
+        short_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
+                          bearish_cross and kama_falling and 
+                          signal_quality_condition and trend_continuity_condition and 
+                          kama_slope_abs >= min_slope_threshold
+        
+        [long_condition, short_condition]
+
+// =============== 第5层：组合计算函数（依赖基础、中间层和复合计算） ===============
+// 统一计算所有市场指标（直接修改marketProfile对象）
+calcMarketIndicators() =>
+    // 计算KAMA
+    marketProfile.kama := calcKAMA()
+    
+    // 计算ATR
+    marketProfile.atr := ta.atr(atr_length)
+    
+    // 计算价格趋势强度
+    [current_slope, current_r2] = calcTrendStrength(close, trend_period)
+    marketProfile.current_slope := current_slope
+    marketProfile.current_r2 := current_r2
+    
+    // 计算KAMA趋势强度
+    [kama_slope, kama_r2] = calcTrendStrength(marketProfile.kama, 12)
+    marketProfile.kama_slope := kama_slope
+    marketProfile.kama_r2 := kama_r2
+    
+    // 计算斜率衰减
+    marketProfile.slope_history := ta.sma(math.abs(current_slope), slope_decay_period)
+    marketProfile.slope_abs := math.abs(current_slope)
+    marketProfile.slope_is_decaying := marketProfile.slope_abs < (marketProfile.slope_history * slope_decay_threshold)
+    marketProfile.kama_slope_abs := math.abs(kama_slope)
+    
+    // 检测市场状态
+    [market_state_value, adx_value, volatility_ratio] = detectMarketState(current_r2)
+    marketProfile.market_state := market_state_value
+    marketProfile.adx_value := adx_value
+    marketProfile.volatility_ratio := volatility_ratio
+
+// 统一计算交易决策（包含仓位计算和交易条件）
+calcTradingDecision() =>
+    // 计算风险调整
+    conditionProfile.risk_percent := calcRiskAdjustmentFactor(marketProfile.current_r2)
+    
+    // 计算仓位大小
+    [position_size, stop_points] = calcPositionSize(conditionProfile.risk_percent, marketProfile.atr, marketProfile.current_r2)
+    conditionProfile.position_size := position_size
+    conditionProfile.stop_points := stop_points
+    
+    // 检查入场条件
+    [long_condition, short_condition] = checkEntryConditions(marketProfile.kama, marketProfile.kama_slope_abs, marketProfile.slope_is_decaying, marketProfile.current_r2)
+
+    conditionProfile.long_condition := long_condition
+    conditionProfile.short_condition := short_condition
+
+// =============== 第6层：交易执行函数（无特殊依赖） ===============
+// 统一执行入场
+executeEntry(direction, position_size, stop_points) =>
+    if position_size != 0
+        executionProfile.entry_price := close
+        
+        if direction == DIRECTION_LONG
+            executionProfile.stop_price := math.ceil(close - stop_points)
+            strategy.entry("Long", strategy.long, position_size, comment="多单@" + syminfo.ticker + " 止损价:" + str.tostring(executionProfile.stop_price, "#.##"))
+            strategy.exit("Long_Stop", "Long", stop=executionProfile.stop_price, comment=syminfo.ticker + " 多单初始止损")
+        else if direction == DIRECTION_SHORT
+            executionProfile.stop_price := math.floor(close + stop_points)
+            strategy.entry("Short", strategy.short, position_size, comment="空单@" + syminfo.ticker + " 止损价:" + str.tostring(executionProfile.stop_price, "#.##"))
+            strategy.exit("Short_Stop", "Short", stop=executionProfile.stop_price, comment=syminfo.ticker + " 空单初始止损")
+        
+        // 重置仓位管理变量
+        executionProfile.highest_profit := 0
+        executionProfile.lowest_profit := 0
+        executionProfile.partial_exit_done := false
+        executionProfile.trailing_stop_activated := false
+
+// 统一处理仓位管理
+handlePosition(atr) =>
+    // 计算当前盈亏（根据仓位方向）
+    current_profit = strategy.position_size > 0 ? (close - executionProfile.entry_price) : (executionProfile.entry_price - close)
+    executionProfile.highest_profit := math.max(executionProfile.highest_profit, current_profit)
+    executionProfile.lowest_profit := math.min(executionProfile.lowest_profit, current_profit)
+    
+    // 第一阶段止盈
+    profit_target_1 = atr * profit_target_1_atr
+
+    if not executionProfile.partial_exit_done and current_profit >= profit_target_1
+        partial_exit_qty = math.floor(math.abs(strategy.position_size) * partial_exit_ratio)
+        if partial_exit_qty > 0
+            position_name = strategy.position_size > 0 ? "Long" : "Short"
+            direction_desc = strategy.position_size > 0 ? "多单" : "空单"
+            strategy.close(position_name, qty=partial_exit_qty, comment=syminfo.ticker + " " + direction_desc + "部分止盈")
+            executionProfile.partial_exit_done := true
+    
+    // 激活移动止损：当盈利达到第一阶段止盈目标时（1.5倍ATR）
+    // 确保在完成部分止盈后再激活移动止损，逻辑更合理
+    if current_profit >= profit_target_1 and not executionProfile.trailing_stop_activated
+        executionProfile.trailing_stop_activated := true
+    
+    // 移动止损逻辑
+    if executionProfile.trailing_stop_activated
+        position_name = strategy.position_size > 0 ? "Long" : "Short"
+        direction_desc = strategy.position_size > 0 ? "多单" : "空单"
+        
+        if strategy.position_size > 0
+            // 多头移动止损
+            new_stop = close - atr * trailing_stop_atr_mult
+
+            if new_stop > executionProfile.stop_price
+                executionProfile.stop_price := new_stop
+                strategy.exit("Long_Stop", "Long", stop=executionProfile.stop_price, comment=syminfo.ticker + " " + direction_desc + "移动止损")
+        else if strategy.position_size < 0
+            // 空头移动止损
+            new_stop = close + atr * trailing_stop_atr_mult
+
+            if new_stop < executionProfile.stop_price
+                executionProfile.stop_price := new_stop
+                strategy.exit("Short_Stop", "Short", stop=executionProfile.stop_price, comment=syminfo.ticker + " " + direction_desc + "移动止损")
+
+// =============== 风险管理函数 ===============
+// 更新回撤控制
+updateDrawdownControl() =>
+    if strategy.equity > conditionProfile.peak_equity
+        conditionProfile.peak_equity := strategy.equity
+        conditionProfile.drawdown_paused := false
+
+    current_drawdown = (conditionProfile.peak_equity - strategy.equity) / conditionProfile.peak_equity
+
+    if current_drawdown > max_drawdown_percent and not conditionProfile.drawdown_paused
+        conditionProfile.drawdown_paused := true
+        conditionProfile.is_paused := true
+        conditionProfile.pause_start_bar := bar_index
+
+// 更新连续止损管理
+updateLossManagement() =>
+    if strategy.closedtrades > strategy.closedtrades[1]
+        last_trade_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        
+        if last_trade_profit > 0
+            conditionProfile.consecutive_losses := 0
+            if marketProfile.market_state == MARKET_TRENDING
+                conditionProfile.recovery_stage := RECOVERY_NORMAL
+            else
+                conditionProfile.recovery_stage := 
+                     conditionProfile.recovery_stage == RECOVERY_REDUCED_80 ? RECOVERY_NORMAL :
+                     conditionProfile.recovery_stage == RECOVERY_REDUCED_60 ? RECOVERY_REDUCED_80 :
+                     conditionProfile.recovery_stage == RECOVERY_REDUCED_40 ? RECOVERY_REDUCED_60 :
+                     conditionProfile.recovery_stage == RECOVERY_REDUCED_20 ? RECOVERY_REDUCED_40 :
+                     RECOVERY_REDUCED_20
+        else
+            conditionProfile.consecutive_losses := conditionProfile.consecutive_losses + 1
+            
+            penalty_multiplier = marketProfile.market_state == MARKET_SIDEWAYS ? 1.5 : 1.0
+            adjusted_losses = math.floor(conditionProfile.consecutive_losses * penalty_multiplier)
+            
+            if adjusted_losses >= 12
+                conditionProfile.is_paused := true
+                conditionProfile.pause_start_bar := bar_index
+                conditionProfile.recovery_stage := RECOVERY_REDUCED_20
+            else if adjusted_losses >= 9
+                conditionProfile.recovery_stage := RECOVERY_REDUCED_40
+            else if adjusted_losses >= 6
+                conditionProfile.recovery_stage := RECOVERY_REDUCED_60
+            else if adjusted_losses >= 3
+                conditionProfile.recovery_stage := RECOVERY_REDUCED_80
 
 // 检查暂停状态
-if is_paused and (bar_index - pause_start_bar) >= pause_days
-    is_paused := false
-    consecutive_losses := 9
-    recovery_stage := 4
+checkPauseStatus() =>
+    if conditionProfile.is_paused and (bar_index - conditionProfile.pause_start_bar) >= pause_days
+        conditionProfile.is_paused := false
+        if conditionProfile.drawdown_paused
+            conditionProfile.consecutive_losses := 8
+            conditionProfile.recovery_stage := RECOVERY_REDUCED_40
+        else
+            conditionProfile.consecutive_losses := 6
+            conditionProfile.recovery_stage := RECOVERY_REDUCED_60
 
-// =============== 指标计算 ===============
-// 基础计算
-xPrice = close
-xvnoise = math.abs(xPrice - xPrice[1])
-nsignal = math.abs(xPrice - xPrice[kama_length])
-nnoise = math.sum(xvnoise, kama_length)
-nefratio = nnoise != 0 ? nsignal / nnoise : 0
+// =============== 主交易流程 ===============
+// 1. 更新回撤控制
+updateDrawdownControl()
 
-// 计算ATR
-atr = ta.atr(atr_length)
+// 2. 更新连续止损管理
+updateLossManagement()
 
-// KAMA计算
-var float kama = 0.0
-kama_smooth = math.pow(nefratio * (kama_fastend - kama_slowend) + kama_slowend, 2)
-kama := nz(kama[1]) + kama_smooth * (xPrice - nz(kama[1]))
+// 3. 检查暂停状态
+checkPauseStatus()
 
-// 基于斜率判断趋势方向
-kama_rising = kama > kama[1]
-kama_falling = kama < kama[1]
+// 4. 计算所有市场指标（统一计算并更新marketProfile）
+calcMarketIndicators()
 
-// 获取当前趋势强度（斜率、R2）
-[current_slope, current_r2] = calcTrendStrength(close, trend_period)
-// 计算 KAMA 斜率
-[kama_slope, kama_r2] = calcTrendStrength(kama, 12)
+// 5. 计算交易决策（包含仓位计算和交易条件）
+calcTradingDecision()
 
-// 计算斜率衰减情况
-slope_history = ta.sma(math.abs(current_slope), slope_decay_period)
-slope_abs = math.abs(current_slope)
-slope_is_decaying = slope_abs < (slope_history * slope_decay_threshold)
+// 6. 执行交易
+if conditionProfile.long_condition
+    executeEntry(DIRECTION_LONG, conditionProfile.position_size, conditionProfile.stop_points)
 
-kama_slope_abs = math.abs(kama_slope)
+if conditionProfile.short_condition
+    executeEntry(DIRECTION_SHORT, conditionProfile.position_size, conditionProfile.stop_points)
 
-// =============== 交易信号 ===============
-// 交叉信号
-bullish_cross = close > kama
-bearish_cross = close < kama
+// 7. 处理现有仓位
+if strategy.position_size != 0
+    handlePosition(marketProfile.atr)
 
-// =============== 仓位计算 ==============
-// 计算止损点数
-stop_points = atr * 2
+// =============== 绘制和信息显示 ===============
+plot(marketProfile.kama, color=color.blue, linewidth=2, title="KAMA")
 
-// 单笔风险
-max_loss_amount = strategy.equity * risk_percent
+// 状态描述
+trend_status = marketProfile.current_r2 > r2_exit_threshold ? "强" : "弱"
+slope_status = marketProfile.slope_is_decaying ? "衰减" : "稳定"
 
-// 基础仓位大小（手数）
-base_position_size = math.floor(max_loss_amount / stop_points / syminfo.pointvalue)
+recovery_stage_desc = 
+  conditionProfile.recovery_stage == RECOVERY_NORMAL ? "正常" :
+  conditionProfile.recovery_stage == RECOVERY_REDUCED_80 ? "0.8仓" :
+  conditionProfile.recovery_stage == RECOVERY_REDUCED_60 ? "0.6仓" :
+  conditionProfile.recovery_stage == RECOVERY_REDUCED_40 ? "0.4仓" :
+  conditionProfile.recovery_stage == RECOVERY_REDUCED_20 ? "0.2仓" :
+  "0.1仓"
 
-// 根据当前状态调整仓位
-position_size_plan = 
-     is_paused ? 0 :
-     recovery_stage == 2 ? math.floor(base_position_size * 0.5) :
-     recovery_stage == 4 ? math.floor(base_position_size * 0.25) :
-     base_position_size
+pause_reason = conditionProfile.drawdown_paused ? "回撤" : "连损"
+pause_remaining = conditionProfile.is_paused ? (pause_days - (bar_index - conditionProfile.pause_start_bar)) : 0
 
-// =============== 止损变量 ===============
-// 止损价格
-var float stop_price = 0
-
-// =============== 入场条件检查 ===============
-// 多头入场：价格上穿KAMA且KAMA向上
-long_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
-                      bullish_cross and kama_rising and not slope_is_decaying and kama_slope_abs >= 0.001
-
-// 空头入场：价格下穿KAMA且KAMA向下
-short_entry_condition = strategy.position_size == 0 and isInTradingTimeFrame() and
-                       bearish_cross and kama_falling and not slope_is_decaying and kama_slope_abs >= 0.001
-
-// 多头入场
-if long_entry_condition
-    stop_price := math.ceil(close - stop_points)
-    log.info(str.tostring(kama_slope_abs))
-    strategy.entry("Long", strategy.long, position_size_plan, comment="多单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##") + " KAMA斜率:" + str.tostring(kama_slope_abs, "#.###"))
-    strategy.exit("Long_Stop_Loss", "Long", stop=stop_price, comment=syminfo.ticker + " 多单止损")
-
-// 空头入场
-if short_entry_condition
-    stop_price := math.floor(close + stop_points)
-    strategy.entry("Short", strategy.short, position_size_plan, comment="空单@" + syminfo.ticker + " 止损价:" + str.tostring(stop_price, "#.##") + " KAMA斜率:" + str.tostring(kama_slope_abs, "#.##") + "%")
-    strategy.exit("Short_Stop_Loss", "Short", stop=stop_price, comment=syminfo.ticker + " 空单止损")
-
-// =============== 止盈条件检查 ===============
-// 不管方向，只要趋势强度衰减就止盈
-trend_strength_exit = current_r2 < r2_exit_threshold and slope_is_decaying
-
-long_profit_exit = strategy.position_size > 0 and (trend_strength_exit or bearish_cross)
-short_profit_exit = strategy.position_size < 0 and (trend_strength_exit or bullish_cross)
-
-// 执行止盈
-if long_profit_exit and strategy.position_size > 0
-    strategy.close("Long", comment=syminfo.ticker + " 多单平仓")
-
-if short_profit_exit and strategy.position_size < 0
-    strategy.close("Short", comment=syminfo.ticker + " 空单平仓")
-
-// =============== 绘制指标 ===============
-// 绘制KAMA均线
-plot(kama, color=color.blue, linewidth=2, title="KAMA")
-
-// =============== 信息显示 ===============
-// 趋势状态描述
-trend_status = current_r2 > r2_exit_threshold ? "强" : "弱"
-slope_status = slope_is_decaying ? "衰减" : "稳定"
-
-// 风险管理状态描述
 risk_status = 
-  is_paused ? "暂停中(" + str.tostring(pause_days - (bar_index - pause_start_bar)) + "K)" :
-  recovery_stage == 2 ? "1/2仓(" + str.tostring(consecutive_losses) + "连损)" :
-  recovery_stage == 4 ? "1/4仓(" + str.tostring(consecutive_losses) + "连损)" :
-  "正常(" + str.tostring(consecutive_losses) + "连损)"
+  conditionProfile.is_paused ? "暂停中(" + pause_reason + "," + str.tostring(pause_remaining) + "K)" :
+  conditionProfile.recovery_stage == RECOVERY_NORMAL ? "正常(" + str.tostring(conditionProfile.consecutive_losses) + "连损)" :
+  recovery_stage_desc + "(" + str.tostring(conditionProfile.consecutive_losses) + "连损)"
+
+market_state_desc = marketProfile.market_state == MARKET_TRENDING ? "趋势市" : "震荡市"
 
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
 label.set_xy(info, bar_index, high)
 
+current_profit_pct = strategy.position_size != 0 ? (strategy.openprofit / strategy.equity * 100) : 0
+trailing_status = executionProfile.trailing_stop_activated ? "已激活" : "未激活"
+partial_status = executionProfile.partial_exit_done ? "已完成" : "未完成"
+current_drawdown = (conditionProfile.peak_equity - strategy.equity) / conditionProfile.peak_equity
+
 label.set_text(info, "KAMA趋势强度策略" + 
      "\n权益：" + str.tostring(math.round(strategy.equity)) + 
-     "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) +
+     "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) + " (" + str.tostring(current_profit_pct, "#.##") + "%)" +
+     "\n回撤：" + str.tostring(current_drawdown * 100, "#.##") + "%" +
      "\n仓位管理：" + risk_status +
-     "\n斜率：" + str.tostring(slope_abs, "#.##") + "%" +
-     "\n斜率-SMA：" + str.tostring(slope_history, "#.##") + "%" +
-     "\nR²：" + str.tostring(current_r2, "#.##") +
+     "\n市场状态：" + market_state_desc + " ADX:" + str.tostring(marketProfile.adx_value, "#") +
+     "\n风险比例：" + str.tostring(conditionProfile.risk_percent * 100, "#.##") + "%" +
+     "\n斜率：" + str.tostring(marketProfile.slope_abs, "#.##") + "%" +
+     "\n斜率阈值：" + str.tostring(min_slope_threshold, "#.##") + "%" +
+     "\nKAMA斜率：" + str.tostring(marketProfile.kama_slope_abs, "#.##") + "%" +
+     "\nR²：" + str.tostring(marketProfile.current_r2, "#.##") +
+     "\n移动止损：" + trailing_status + " 部分止盈：" + partial_status +
      "\n趋势：一致性-" + trend_status + " 斜率-" + slope_status)
