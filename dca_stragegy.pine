@@ -1,56 +1,121 @@
 //@version=6
-strategy("DCA Strategy: Fixed Amount Every Monday, 30% Profit Target", overlay=true, pyramiding=9999, default_qty_type=strategy.fixed, process_orders_on_close=true)
+strategy("DCA Strategy: Dynamic Amount Based on EMAs", overlay=true, pyramiding=9999, default_qty_type=strategy.fixed, process_orders_on_close=true)
 
-// 参数设置
-var float investment_amount = 5000.0  // 每次买入的固定金额
-var float profit_target = 30.0        // 30%的止盈线
+// 参数设置 - 买入金额（常量）
+AMOUNT_0 = 2000.0
+AMOUNT_1 = 3000.0
+AMOUNT_2 = 4000.0
+AMOUNT_3 = 5000.0
+AMOUNT_4 = 6000.0
+AMOUNT_5 = 8000.0
+
+// 止盈设置
+PROFIT_TARGET = 0.3
+
+// 计算EMA均线
+ema200 = ta.ema(close, 200)
+ema400 = ta.ema(close, 400)
+ema600 = ta.ema(close, 600)
+ema800 = ta.ema(close, 800)
+ema1000 = ta.ema(close, 1000)
+
+// 在图表上绘制均线
+plot(ema200, color=color.blue, title="EMA 200")
+plot(ema400, color=color.green, title="EMA 400")
+plot(ema600, color=color.yellow, title="EMA 600")
+plot(ema800, color=color.orange, title="EMA 800")
+plot(ema1000, color=color.red, title="EMA 1000")
 
 // 追踪持仓状态
 var float total_investment = 0.0
 var float total_shares = 0.0
+var int total_invest_time = 0
+var bool dca_started = false  // 标记是否已开始定投
+
+// 检测均线空头排列：短周期均线在长周期均线下方
+is_bearish_alignment = ema200 < ema400 and ema400 < ema600 and ema600 < ema800 and ema800 < ema1000
 
 // 检测时间条件：是否为周一的第一根K线
 is_monday = dayofweek == dayofweek.monday
 is_first_bar_of_day = na(time_close[1]) or time_close[1] < time - 1000*60*60*6  // 如果前一根K线的时间戳与当前差超过6小时，认为是新的一天
 
-// 执行买入策略（仅在周一的第一根K线买入固定金额）
-if is_monday and is_first_bar_of_day
+// 如果均线转为空头排列，开始定投
+if is_bearish_alignment and not dca_started
+    dca_started := true
+
+// 执行买入策略（仅在周一的第一根K线买入，且已开始定投，金额根据价格位置动态调整）
+if is_monday and is_first_bar_of_day and dca_started
+    // 根据价格位置确定买入金额
+    int line_break = 0
+    float investment_amount = 0.0
+
+    if close <= ema200
+        line_break := line_break + 1
+
+    if close <= ema400
+        line_break := line_break + 1
+
+    if close <= ema600
+        line_break := line_break + 1
+
+    if close <= ema800
+        line_break := line_break + 1
+
+    if close <= ema1000
+        line_break := line_break + 1
+
+    if line_break == 0
+        investment_amount := AMOUNT_0
+    else if line_break == 1
+        investment_amount := AMOUNT_1
+    else if line_break == 2
+        investment_amount := AMOUNT_2
+    else if line_break == 3
+        investment_amount := AMOUNT_3
+    else if line_break == 4
+        investment_amount := AMOUNT_4
+    else
+        investment_amount := AMOUNT_5
+    
     // 计算可以买入的股数，并调整为100的整数倍
     shares_to_buy = investment_amount / close
     adjusted_shares = math.floor(shares_to_buy / 100) * 100
     
     // 确保买入的股数至少为100
-    if adjusted_shares >= 100
+    if adjusted_shares >= 100 and (strategy.position_size > 0 or investment_amount >= 5)
         // 实际投入的资金
         actual_investment = adjusted_shares * close
         
-        // 执行买入操作
         strategy.entry("Buy", strategy.long, qty=adjusted_shares)
         
         // 更新总投入资金和持有总股数
         total_investment := total_investment + actual_investment
         total_shares := total_shares + adjusted_shares
-        
+        total_invest_time := total_invest_time + 1
 
 // 计算当前市值（仍然需要手动计算这个）
 current_value = total_shares > 0 ? total_shares * close : 0
 
 // 使用内置变量判断止盈
-if strategy.openprofit_percent >= profit_target
+if strategy.openprofit / total_investment >= PROFIT_TARGET
     // 执行全部卖出操作
-    strategy.close_all("Take Profit: Return rate reached " + str.tostring(profit_target, "#.##") + "%")
+    strategy.close_all("Take Profit: " + str.tostring(strategy.openprofit, "#.##") + " Total Invest: " +str.tostring(total_investment, "#.##"))
     
-    // 重置持仓状态
+    // 重置持仓状态和定投状态
     total_investment := 0.0
     total_shares := 0.0
+    total_invest_time := 0
+    dca_started := false
 
 // 在图表上显示当前持仓状态（使用中文标签）
 var label status_label = na
 label.delete(status_label)
 status_label := label.new(bar_index, high, 
+                 "定投状态: " + (dca_started ? "已开始" : "未开始") + "\n" +
                  "总投入: " + str.tostring(total_investment, "#.##") + "\n" +
+                 "定投次数: " + str.tostring(total_invest_time, "#") + "\n" +
                  "持有股数: " + str.tostring(total_shares) + "\n" +
                  "当前市值: " + str.tostring(current_value, "#.##") + "\n" +
-                 "收益率: " + str.tostring(strategy.openprofit_percent, "#.##") + "%",
+                 "收益率: " + str.tostring(total_investment > 0 ? (strategy.openprofit / total_investment) * 100 : 0, "#.##") + "%",
                  style=label.style_label_down,
                  color=strategy.openprofit_percent >= 0 ? color.green : color.red)
