@@ -5,11 +5,11 @@ strategy("KAMA Strategy - Futures",
      precision=2, 
      initial_capital=500000, 
      commission_type="percent",
-     commission_value=0.0001,
+     commission_value=0.0002,
      pyramiding=0, 
      default_qty_type = strategy.fixed,
-     margin_long=100,
-     margin_short=100)
+     margin_long=10,
+     margin_short=10)
 
 // =============== 常量定义 ===============
 // 恢复阶段枚举
@@ -570,8 +570,7 @@ label.set_text(info, "KAMA趋势强度策略" +
      "\n仓位管理：" + risk_status +
      "\n市场状态：" + market_state_desc + " ADX:" + str.tostring(marketProfile.adx_value, "#") +
      "\n风险比例：" + str.tostring(conditionProfile.risk_percent * 100, "#.##") + "%" +
-     "\n斜率：" + str.tostring(marketProfile.slope_abs, "#.##") + "%" +
-     "\n斜率阈值：" + str.tostring(min_slope_threshold, "#.##") + "%" +
+     "\nKAMA斜率阈值：" + str.tostring(min_slope_threshold, "#.##") + "%" +
      "\nKAMA斜率：" + str.tostring(marketProfile.kama_slope_abs, "#.##") + "%" +
      "\nR²：" + str.tostring(marketProfile.current_r2, "#.##") +
      "\n移动止损：" + trailing_status + " 部分止盈：" + partial_status +
