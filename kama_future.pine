@@ -7,6 +7,7 @@ strategy("KAMA Strategy - Futures",
      commission_type="percent",
      commission_value=0.0002,
      pyramiding=0, 
+     process_orders_on_close=true,
      default_qty_type = strategy.fixed,
      margin_long=10,
      margin_short=10)
@@ -35,7 +36,7 @@ kama_fastend = 0.866                // KAMA - Fast End
 kama_slowend = 0.060                // KAMA - Slow End
 
 // 入场阈值参数
-min_slope_threshold = 0.100          // 最小斜率阈值(%)
+min_slope_threshold = 0.090          // 最小斜率阈值(%)
 
 // 止盈止损参数
 // 初始止损说明：
@@ -44,8 +45,8 @@ min_slope_threshold = 0.100          // 最小斜率阈值(%)
 // - 3.0-4.0倍：止损过宽，单笔损失可能过大
 initial_stop_atr_mult = 2.5         // 初始止损ATR倍数
 profit_target_1_atr = 1.5           // 第一阶段止盈ATR倍数
-partial_exit_ratio = 0.5            // 第一阶段止盈比例
-trailing_stop_atr_mult = 1.5        // 移动止损ATR倍数
+partial_exit_ratio = 0.35           // 第一阶段止盈比例
+trailing_stop_atr_mult = 2.0        // 移动止损ATR倍数
 
 // 线性回归趋势强度参数
 trend_period = 18                   // 斜率检测周期
@@ -54,9 +55,9 @@ trend_period = 18                   // 斜率检测周期
 // - 0.3是经过优化的平衡值：既能捕捉到有效趋势，又不会过于严格
 // - 金融市场中R²=0.3已表示30%的价格变化可用线性趋势解释，属于中等强度趋势
 // - 设置过高(如0.8)会错过很多交易机会，设置过低(如0.1)会产生过多假信号
-r2_exit_threshold = 0.3             // R²止盈阈值
+r2_exit_threshold = 0.25             // R²止盈阈值
 slope_decay_period = 12             // 斜率衰减检测周期
-slope_decay_threshold = 0.5         // 斜率衰减比例
+slope_decay_threshold = 0.4         // 斜率衰减比例
 
 // 仓位和风险参数
 base_risk_percent = 0.02            // 基础风险比例(%)
@@ -281,8 +282,7 @@ calcRiskAdjustmentFactor(current_r2) =>
     // 5. 根据回撤程度进一步调整风险因子（回撤保护）
     // 当回撤超过最大回撤阈值的一半时，将仓位减半
     // 例如：最大回撤阈值15%，当回撤>7.5%时，仓位减半
-    // drawdown_adjustment = current_drawdown > max_drawdown_percent * 0.5 ? 0.5 : 1.0
-    drawdown_adjustment = 1
+    drawdown_adjustment = current_drawdown > max_drawdown_percent * 0.5 ? 0.5 : 1.0
 
     // 6. 综合计算最终风险比例（多重保护机制）
     // 基础风险 × 连损调整 × 市场调整 × 趋势强度调整 × 回撤调整
@@ -315,8 +315,8 @@ checkEntryConditions(kama, kama_slope_abs, slope_is_decaying, current_r2) =>
         // 情况2：震荡市 + 强趋势信号(R²>0.4) → 允许交易
         // 所有情况都需要：斜率未衰减
         signal_quality_condition = 
-             (marketProfile.market_state == MARKET_TRENDING and current_r2 > 0.3) or  // 趋势市：标准质量
-             (marketProfile.market_state == MARKET_SIDEWAYS and current_r2 > 0.4)     // 震荡市：高质量要求
+             (marketProfile.market_state == MARKET_TRENDING and current_r2 > 0.32) or  // 趋势市：标准质量
+             (marketProfile.market_state == MARKET_SIDEWAYS and current_r2 > 0.42)     // 震荡市：高质量要求
         
         // 趋势持续性过滤（确保趋势未衰减）
         trend_continuity_condition = not slope_is_decaying

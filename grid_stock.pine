@@ -22,6 +22,7 @@ LATE_GRID_DROP_PERCENT = 0.10                       // 超过5个网格后下跌
 LATE_TAKE_PROFIT_PERCENT = 0.15                     // 超过5个网格后止盈百分比(%)
 EARLY_GRID_INCREASE_PERCENT = 0.10                  // 前5个网格加仓比例(%)
 LATE_GRID_INCREASE_PERCENT = 0.15                   // 超过5个网格后加仓比例(%)
+BEAR_MARKET_INCREASE_PERCENT = 0.20                 // 超过5个网格后，熊市加仓比例(%)
 MAX_GRIDS = 40                                      // 最大网格层数
 COOLDOWN_PERIOD = 4                                 // 清仓后冷却K线数
 REENTRY_DISCOUNT = 0.03                             // 提前重入回调幅度(%)
@@ -69,13 +70,15 @@ var int cooldown_bars = 0
 var float last_exit_price = 0.0
 // 最大资金占用记录
 var float max_capital_used = 0.0
+// 当前资金占用
+var float current_capital_used = 0.0
 
 // =============== 均线系统计算 ===============
 // 计算4根均线
-ma1 = ta.sma(close, 25*4)  // 100日均线
-ma2 = ta.sma(close, 75*4)  // 300日均线
-ma3 = ta.sma(close, 125*4) // 500日均线
-ma4 = ta.sma(close, 250*4) // 1000日均线
+ma1 = ta.sma(close, 25 * 4)  // 月线
+ma2 = ta.sma(close, 75 * 4)  // 季线
+ma3 = ta.sma(close, 125 * 4) // 半年线
+ma4 = ta.sma(close, 250 * 4) // 年线
 
 // 判断市场趋势
 is_bull_market = ma1 > ma2 and ma2 > ma3 and ma3 > ma4
@@ -112,10 +115,10 @@ calculate_additional_shares(current_position_size, current_slot) =>
         // 超过5个网格：根据市场状态调整加仓比例
         if is_bear_market
             // 熊市：加仓20%
-            increase_percent := 0.20
+            increase_percent := BEAR_MARKET_INCREASE_PERCENT
         else
             // 非熊市：加仓15%
-            increase_percent := 0.15
+            increase_percent := LATE_GRID_INCREASE_PERCENT
         
         additional_shares = math.floor(current_position_size * increase_percent / 100) * 100
         min_shares = 200
@@ -178,7 +181,7 @@ if initial_entry_condition
         next_slot := next_slot + 1
         
         // 更新最大资金占用
-        current_capital_used = calculate_total_capital_used()
+        current_capital_used := calculate_total_capital_used()
         max_capital_used := math.max(max_capital_used, current_capital_used)
 else if add_position_condition
     // 计算加仓数量（根据当前网格层数使用不同加仓比例）
@@ -205,7 +208,7 @@ else if add_position_condition
         next_slot := next_slot + 1
         
         // 更新最大资金占用
-        current_capital_used = calculate_total_capital_used()
+        current_capital_used := calculate_total_capital_used()
         max_capital_used := math.max(max_capital_used, current_capital_used)
 
 // 如果有持仓，判断是否可以止盈
@@ -254,10 +257,10 @@ plot(strategy.position_size > 0 ? current_grid_profit_price : na, "当前网格�
 
 // =============== 绘制均线系统 ===============
 // 绘制均线
-plot(ma1, "MA100", color=color.new(color.yellow, 0), linewidth=1)
-plot(ma2, "MA300", color=color.new(color.orange, 0), linewidth=1)
-plot(ma3, "MA500", color=color.new(color.purple, 0), linewidth=1)
-plot(ma4, "MA1000", color=color.new(color.navy, 0), linewidth=1)
+plot(ma1, "MA100", color=color.new(#D3D3D3, 0), linewidth=1)  // 浅灰色
+plot(ma2, "MA300", color=color.new(#A9A9A9, 0), linewidth=1)  // 深灰色
+plot(ma3, "MA500", color=color.new(#808080, 0), linewidth=1)  // 灰色
+plot(ma4, "MA1000", color=color.new(#696969, 0), linewidth=1) // 暗灰色
 
 // =============== 信息显示 ===============
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
@@ -268,9 +271,9 @@ market_trend_text = is_bull_market ? "🐂 牛市" : is_bear_market ? "🐻 熊�
 
 label.set_text(info, "网格交易策略" + 
      "\n\n价值：" + str.tostring(math.round(strategy.position_size * close)) + 
-     "\n现金流：" + str.tostring(math.round(available_cash)) + 
-     "\n浮盈：" + str.tostring(math.round(strategy.openprofit)) + 
+     "\n最大资金占用：" + str.tostring(math.round(max_capital_used)) +
+     "\n当前资金占用：" + str.tostring(math.round(current_capital_used)) +
+     "\n现金余额：" + str.tostring(math.round(available_cash)) + 
      "\n持仓：" + str.tostring(strategy.position_size) +
      "\nSlot：" + str.tostring(next_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
-     "\n最大资金占用：" + str.tostring(math.round(max_capital_used)) +
      "\n市场趋势：" + market_trend_text)
