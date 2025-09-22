@@ -84,7 +84,6 @@ ma4 = ta.sma(close, 250 * 4) // 年线
 is_bull_market = ma1 > ma2 and ma2 > ma3 and ma3 > ma4
 is_bear_market = ma1 < ma2 and ma2 < ma3 and ma3 < ma4
 
-// =============== 辅助函数 ===============
 // 计算可以买入的股数（必须是100的整数倍）
 calculate_shares(amount, price) =>
     math.floor(amount / price / 100) * 100
@@ -104,13 +103,13 @@ calculate_take_profit_price(entry_price, current_slot) =>
 // 计算加仓数量（根据当前网格层数和市场状态使用不同加仓策略）
 calculate_additional_shares(current_position_size, current_slot) =>
     increase_percent = 0.10
+    additional_shares = 0
 
     if current_slot < 5
         // 前5个网格：使用固定加仓比例
         increase_percent := EARLY_GRID_INCREASE_PERCENT
-        additional_shares = math.floor(current_position_size * increase_percent / 100) * 100
-        min_shares = 100
-        additional_shares < min_shares ? min_shares : additional_shares
+        additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
+        additional_shares := math.max(100, additional_shares)
     else
         // 超过5个网格：根据市场状态调整加仓比例
         if is_bear_market
@@ -120,9 +119,10 @@ calculate_additional_shares(current_position_size, current_slot) =>
             // 非熊市：加仓15%
             increase_percent := LATE_GRID_INCREASE_PERCENT
         
-        additional_shares = math.floor(current_position_size * increase_percent / 100) * 100
-        min_shares = 200
-        additional_shares < min_shares ? min_shares : additional_shares
+        additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
+        additional_shares := math.max(200, additional_shares)
+    
+    additional_shares
 
 // 计算当前所有持仓的总成本
 calculate_total_capital_used() =>
