@@ -29,6 +29,9 @@ REENTRY_DISCOUNT = 0.03                             // 提前重入回调幅度(
 // 股票回测时间限制 (5年)
 FIVE_YEARS_IN_MS = 5 * 365 * 24 * 60 * 60 * 1000
 
+// =============== 调试模式参数 ===============
+DEBUG_MODE = input.bool(false, "DEBUG模式", group="调试设置", tooltip="开启后显示详细的网格信息表格")
+
 in_trading_timeframe = time > (timenow - FIVE_YEARS_IN_MS)
 
 // --- K线时间，方便调试 ---
@@ -51,9 +54,11 @@ k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
 
 // =============== 网格交易状态变量 ===============
 // 用数组记录每批次的买入价格、数量和ID
-var float[] entry_prices = array.new_float(MAX_GRIDS, 0.0)
-var float[] entry_quantities = array.new_float(MAX_GRIDS, 0.0)
-var string[] entry_ids = array.new_string(MAX_GRIDS, "")
+// 注意：网格从1开始编号，数组索引 = 网格编号
+// 例如：网格1存储在数组索引1，网格2存储在数组索引2，以此类推
+var float[] entry_prices = array.new_float(MAX_GRIDS + 1, 0.0)
+var float[] entry_quantities = array.new_float(MAX_GRIDS + 1, 0.0)
+var string[] entry_ids = array.new_string(MAX_GRIDS + 1, "")
 
 var float available_cash = strategy.initial_capital
 // 记录最后一次买入价格（用于计算下一个网格）
@@ -62,8 +67,10 @@ var float last_entry_price = 0.0
 var float next_grid_price = 0.0
 // 记录当前网格止盈价格
 var float current_grid_profit_price = 0.0
-// 记录当前活跃的网格
-var int next_slot = 0
+// 记录当前被占用的网格数量（网格从1开始编号）
+var int current_slot = 0
+// 记录下一个空闲的网格位置（网格从1开始编号）
+var int next_slot = 1
 // 时间冷却机制
 var int cooldown_bars = 0
 // 最后清仓价格
@@ -91,13 +98,13 @@ calculate_shares(amount, price) =>
 // 计算下一个网格买入点（根据当前网格层数使用不同参数）
 calculate_next_grid_price(last_price, current_slot) =>
     // 前5个网格使用较小的下跌幅度，超过5个网格使用较大的下跌幅度
-    drop_percent = current_slot < 5 ? EARLY_GRID_DROP_PERCENT : LATE_GRID_DROP_PERCENT
+    drop_percent = current_slot <= 5 ? EARLY_GRID_DROP_PERCENT : LATE_GRID_DROP_PERCENT
     last_price * (1 - drop_percent)
 
 // 计算止盈价格（根据当前网格层数使用不同参数）
 calculate_take_profit_price(entry_price, current_slot) =>
     // 前5个网格使用较小的止盈幅度，超过5个网格使用较大的止盈幅度
-    profit_percent = current_slot < 5 ? EARLY_TAKE_PROFIT_PERCENT : LATE_TAKE_PROFIT_PERCENT
+    profit_percent = current_slot <= 5 ? EARLY_TAKE_PROFIT_PERCENT : LATE_TAKE_PROFIT_PERCENT
     entry_price * (1 + profit_percent)
 
 // 计算加仓数量（根据当前网格层数和市场状态使用不同加仓策略）
@@ -105,7 +112,7 @@ calculate_additional_shares(current_position_size, current_slot) =>
     increase_percent = 0.10
     additional_shares = 0
 
-    if current_slot < 5
+    if current_slot <= 5
         // 前5个网格：使用固定加仓比例
         increase_percent := EARLY_GRID_INCREASE_PERCENT
         additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
@@ -127,14 +134,15 @@ calculate_additional_shares(current_position_size, current_slot) =>
 // 计算当前所有持仓的总成本
 calculate_total_capital_used() =>
     total_cost = 0.0
-    for i = 0 to next_slot - 1
+    for i = 1 to current_slot
         if array.get(entry_quantities, i) > 0
             total_cost := total_cost + array.get(entry_quantities, i) * array.get(entry_prices, i)
     total_cost
 
 // 变量重置
 if strategy.position_size == 0
-    next_slot := 0
+    current_slot := 0
+    next_slot := 1
 
 // =============== 入场和加仓条件 ===============
 // 每根K线减少冷却计数器
@@ -153,7 +161,7 @@ entry_condition_2 = cooldown_finished or price_dropped_enough
 initial_entry_condition = entry_condition_1 and entry_condition_2
 
 // 加仓条件（价格下跌至下一个网格点且活跃网格数小于最大值）
-add_position_condition = strategy.position_size > 0 and in_trading_timeframe and close <= next_grid_price and next_slot > 0 and next_slot < MAX_GRIDS
+add_position_condition = strategy.position_size > 0 and in_trading_timeframe and close <= next_grid_price and current_slot > 0 and current_slot < MAX_GRIDS
 
 // =============== 执行策略 ===============
 // 初始建仓
@@ -166,26 +174,27 @@ if initial_entry_condition
 
         strategy.entry(entryId, strategy.long, qty=shares_to_buy, comment=syminfo.ticker + " 初始建仓@" + str.tostring(close))
         
-        // 记录这批次的买入信息
-        array.set(entry_prices, 0, close)
-        array.set(entry_quantities, 0, shares_to_buy)
-        array.set(entry_ids, 0, entryId)
+        // 记录这批次的买入信息（网格1存储在数组索引1）
+        array.set(entry_prices, 1, close)
+        array.set(entry_quantities, 1, shares_to_buy)
+        array.set(entry_ids, 1, entryId)
         
         // 记录现金余额
         available_cash := available_cash - shares_to_buy * close
         // 记录买入价格
         last_entry_price := close
-        // 计算下一个网格价格
-        next_grid_price := calculate_next_grid_price(close, next_slot)
-        // 递增网格
-        next_slot := next_slot + 1
+        // 更新网格状态（网格1已占用）
+        current_slot := 1
+        next_slot := 2
+        // 计算下一个网格价格（网格2）
+        next_grid_price := calculate_next_grid_price(close, current_slot)
         
         // 更新最大资金占用
         current_capital_used := calculate_total_capital_used()
         max_capital_used := math.max(max_capital_used, current_capital_used)
 else if add_position_condition
     // 计算加仓数量（根据当前网格层数使用不同加仓比例）
-    additional_shares = calculate_additional_shares(strategy.position_size, next_slot)
+    additional_shares = calculate_additional_shares(strategy.position_size, current_slot)
 
     // 网格加仓
     if available_cash >= additional_shares * close
@@ -193,7 +202,7 @@ else if add_position_condition
         strategy.entry(entryId, strategy.long, qty=additional_shares, comment = 
          syminfo.ticker + " 网格加仓#" + str.tostring(next_slot) + "@" + str.tostring(close))
         
-        // 记录这批次的买入信息
+        // 记录这批次的买入信息（网格编号直接作为数组索引）
         array.set(entry_prices, next_slot, close)
         array.set(entry_quantities, next_slot, additional_shares)
         array.set(entry_ids, next_slot, entryId)
@@ -202,31 +211,31 @@ else if add_position_condition
         available_cash := available_cash - additional_shares * close
         // 更新最后一次买入价格
         last_entry_price := close
-        // 计算下一个网格价格
-        next_grid_price := calculate_next_grid_price(close, next_slot)
-        // 递增网格
+        // 更新网格状态
+        current_slot := next_slot
         next_slot := next_slot + 1
+        // 计算下一个网格价格
+        next_grid_price := calculate_next_grid_price(close, current_slot)
         
         // 更新最大资金占用
         current_capital_used := calculate_total_capital_used()
         max_capital_used := math.max(max_capital_used, current_capital_used)
 
 // 如果有持仓，判断是否可以止盈
-if next_slot > 0
-    target_slot = next_slot - 1
-    // 获取该批次的信息
-    entry_price = array.get(entry_prices, target_slot)
-    entry_quantity = array.get(entry_quantities, target_slot)
-    entry_id = array.get(entry_ids, target_slot)
+if current_slot > 0
+    // 获取当前监控的批次信息（最后一个批次，网格编号为current_slot）
+    entry_price = array.get(entry_prices, current_slot)
+    entry_quantity = array.get(entry_quantities, current_slot)
+    entry_id = array.get(entry_ids, current_slot)
     
     // 计算该批次的止盈价格
-    current_grid_profit_price := calculate_take_profit_price(entry_price, target_slot)
+    current_grid_profit_price := calculate_take_profit_price(entry_price, current_slot)
     
     // 检查是否达到止盈条件
     if close >= current_grid_profit_price
         c = ""
-        if next_slot > 1
-            c:= syminfo.ticker + " 批次止盈#" + str.tostring(target_slot) +"@" + str.tostring(close)
+        if current_slot > 1
+            c:= syminfo.ticker + " 批次止盈#" + str.tostring(current_slot) +"@" + str.tostring(close)
         else
             c := syminfo.ticker + " 清仓@" + str.tostring(close)
 
@@ -234,17 +243,19 @@ if next_slot > 0
         strategy.close(entry_id, qty=entry_quantity, comment=c)
         // 更新现金余额
         available_cash := available_cash + entry_quantity * close
-        // 恢复该网格
-        next_slot := next_slot - 1
-        
-        // 回到上一级网格价格
-        last_entry_price := close
-        next_grid_price := calculate_next_grid_price(last_entry_price, next_slot)
-        
+        // 减少占用的网格数量
+        current_slot := current_slot - 1
+        next_slot := current_slot + 1
 
-        if next_slot > 0
-            // 对买入价进行调整，以响应实际卖出价
-            array.set(entry_prices, next_slot, close)
+        if current_slot > 0
+            // 回到上一级网格价格
+            last_entry_price := close
+            // 对买入价进行调整，以响应实际卖出价（更新当前网格的价格）
+            array.set(entry_prices, current_slot, close)
+            // 计算预期加仓价（下一个网格价格） 
+            next_grid_price := calculate_next_grid_price(last_entry_price, current_slot)
+            // 计算卖出价格
+            current_grid_profit_price := calculate_take_profit_price(entry_price, current_slot)
         else
             cooldown_bars := COOLDOWN_PERIOD
             last_exit_price := close
@@ -264,6 +275,7 @@ plot(ma4, "MA1000", color=color.new(#696969, 0), linewidth=1) // 暗灰色
 
 // =============== 信息显示 ===============
 var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
+var table debug_table = table.new(position.top_right, 5, MAX_GRIDS + 2, bgcolor=color.white, border_width=1)
 
 label.set_xy(info, bar_index, high)
 // 市场趋势文字
@@ -275,5 +287,64 @@ label.set_text(info, "网格交易策略" +
      "\n当前资金占用：" + str.tostring(math.round(current_capital_used)) +
      "\n现金余额：" + str.tostring(math.round(available_cash)) + 
      "\n持仓：" + str.tostring(strategy.position_size) +
-     "\nSlot：" + str.tostring(next_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
+     "\nSlot：" + str.tostring(current_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
      "\n市场趋势：" + market_trend_text)
+        
+// 生成DEBUG模式下的表格内容
+get_debug_table_content() =>
+    table_content = ""
+    if DEBUG_MODE and current_slot > 0
+        // 表格标题
+        table_content := "Slot | 买入价 | 股数 | 预期卖出价 | 预期加仓价\n"
+        table_content := table_content + "-----|--------|------|------------|------------\n"
+        
+        // 遍历所有活跃的Slot（网格从1开始编号）
+        for i = 1 to current_slot
+            entry_price = array.get(entry_prices, i)
+            entry_quantity = array.get(entry_quantities, i)
+            
+            if entry_quantity > 0
+                grid_number = i  // 网格编号就是循环变量i
+                // 计算预期卖出价
+                expected_sell_price = calculate_take_profit_price(entry_price, grid_number)
+                // 计算预期加仓价（下一个网格价格）
+                expected_add_price = calculate_next_grid_price(entry_price, grid_number)
+                
+                table_content := table_content + 
+                     str.tostring(grid_number) + " | " + 
+                     str.tostring(math.round(entry_price, 2)) + " | " + 
+                     str.tostring(math.round(entry_quantity)) + " | " + 
+                     str.tostring(math.round(expected_sell_price, 2)) + " | " + 
+                     str.tostring(math.round(expected_add_price, 2)) + "\n"
+    
+    table_content
+
+// 根据DEBUG模式显示不同内容
+if DEBUG_MODE
+    // DEBUG模式：显示表格
+    table.clear(debug_table, 0, 0, 4, MAX_GRIDS + 1)
+    
+    // 设置表格标题
+    table.cell(debug_table, 0, 0, "Slot", text_color=color.black, bgcolor=color.gray)
+    table.cell(debug_table, 1, 0, "买入价", text_color=color.black, bgcolor=color.gray)
+    table.cell(debug_table, 2, 0, "股数", text_color=color.black, bgcolor=color.gray)
+    table.cell(debug_table, 3, 0, "预期卖出价", text_color=color.black, bgcolor=color.gray)
+    table.cell(debug_table, 4, 0, "预期加仓价", text_color=color.black, bgcolor=color.gray)
+    
+    // 填充数据行（网格从1开始编号）
+    if current_slot > 0
+        for i = 1 to current_slot
+            entry_price = array.get(entry_prices, i)
+            entry_quantity = array.get(entry_quantities, i)
+            
+            if entry_quantity > 0
+                row = i  // 表格行号 = 网格编号
+                grid_number = i  // 网格编号就是循环变量i
+                expected_sell_price = calculate_take_profit_price(entry_price, grid_number)
+                expected_add_price = calculate_next_grid_price(entry_price, grid_number)
+                
+                table.cell(debug_table, 0, row, str.tostring(grid_number), text_color=color.black)
+                table.cell(debug_table, 1, row, str.tostring(math.round(entry_price, 2)), text_color=color.black)
+                table.cell(debug_table, 2, row, str.tostring(math.round(entry_quantity)), text_color=color.black)
+                table.cell(debug_table, 3, row, str.tostring(math.round(expected_sell_price, 2)), text_color=color.black)
+                table.cell(debug_table, 4, row, str.tostring(math.round(expected_add_price, 2)), text_color=color.black)
