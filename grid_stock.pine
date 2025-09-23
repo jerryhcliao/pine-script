@@ -62,7 +62,7 @@ var string[] entry_ids = array.new_string(MAX_GRIDS + 1, "")
 
 var float available_cash = strategy.initial_capital
 // 记录最后一次买入价格（用于计算下一个网格）
-var float last_entry_price = 0.0
+var float current_entry_price = 0.0
 // 记录下一个网格买入价格
 var float next_grid_price = 0.0
 // 记录当前网格止盈价格
@@ -182,7 +182,7 @@ if initial_entry_condition
         // 记录现金余额
         available_cash := available_cash - shares_to_buy * close
         // 记录买入价格
-        last_entry_price := close
+        current_entry_price := close
         // 更新网格状态（网格1已占用）
         current_slot := 1
         next_slot := 2
@@ -210,7 +210,7 @@ else if add_position_condition
         // 记录现金余额
         available_cash := available_cash - additional_shares * close
         // 更新最后一次买入价格
-        last_entry_price := close
+        current_entry_price := close
         // 更新网格状态
         current_slot := next_slot
         next_slot := next_slot + 1
@@ -249,11 +249,9 @@ if current_slot > 0
 
         if current_slot > 0
             // 回到上一级网格价格
-            last_entry_price := close
-            // 对买入价进行调整，以响应实际卖出价（更新当前网格的价格）
-            array.set(entry_prices, current_slot, close)
+            current_entry_price := array.get(entry_prices, current_slot)
             // 计算预期加仓价（下一个网格价格） 
-            next_grid_price := calculate_next_grid_price(last_entry_price, current_slot)
+            next_grid_price := calculate_next_grid_price(current_entry_price, current_slot)
             // 计算卖出价格
             current_grid_profit_price := calculate_take_profit_price(entry_price, current_slot)
         else
@@ -263,7 +261,7 @@ if current_slot > 0
 // =============== 绘制价格线 ===============
 // 绘制下一个网格买入价
 plot(strategy.position_size > 0 ? next_grid_price : na, "下一网格买入价", color=color.new(color.blue, 0), style=plot.style_cross)
-plot(strategy.position_size > 0 ? last_entry_price : na, "当前网格买入价", color=color.new(color.gray, 0), style=plot.style_cross)
+plot(strategy.position_size > 0 ? current_entry_price : na, "当前网格买入价", color=color.new(color.gray, 0), style=plot.style_cross)
 plot(strategy.position_size > 0 ? current_grid_profit_price : na, "当前网格止盈价", color=color.new(color.red, 0), style=plot.style_cross)
 
 // =============== 绘制均线系统 ===============
@@ -274,26 +272,11 @@ plot(ma3, "MA500", color=color.new(#808080, 0), linewidth=1)  // 灰色
 plot(ma4, "MA1000", color=color.new(#696969, 0), linewidth=1) // 暗灰色
 
 // =============== 信息显示 ===============
-var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
-var table debug_table = table.new(position.top_right, 5, MAX_GRIDS + 2, bgcolor=color.white, border_width=1)
-
-label.set_xy(info, bar_index, high)
-// 市场趋势文字
-market_trend_text = is_bull_market ? "🐂 牛市" : is_bear_market ? "🐻 熊市" : "📊 震荡市"
-
-label.set_text(info, "网格交易策略" + 
-     "\n\n价值：" + str.tostring(math.round(strategy.position_size * close)) + 
-     "\n最大资金占用：" + str.tostring(math.round(max_capital_used)) +
-     "\n当前资金占用：" + str.tostring(math.round(current_capital_used)) +
-     "\n现金余额：" + str.tostring(math.round(available_cash)) + 
-     "\n持仓：" + str.tostring(strategy.position_size) +
-     "\nSlot：" + str.tostring(current_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
-     "\n市场趋势：" + market_trend_text)
-        
 // 生成DEBUG模式下的表格内容
 get_debug_table_content() =>
     table_content = ""
-    if DEBUG_MODE and current_slot > 0
+    
+    if DEBUG_MODE and current_slot > 0 and barstate.islastconfirmedhistory
         // 表格标题
         table_content := "Slot | 买入价 | 股数 | 预期卖出价 | 预期加仓价\n"
         table_content := table_content + "-----|--------|------|------------|------------\n"
@@ -319,8 +302,28 @@ get_debug_table_content() =>
     
     table_content
 
+if barstate.islastconfirmedhistory
+    var label info = label.new(bar_index, na, "", color=color.blue, style=label.style_label_left, textcolor=color.white)
+
+    label.set_xy(info, bar_index, high)
+    // 市场趋势文字
+    market_trend_text = is_bull_market ? "🐂 牛市" : is_bear_market ? "🐻 熊市" : "📊 震荡市"
+
+    label.set_text(info, "网格交易策略" + 
+         "\n\n价值：" + str.tostring(math.round(strategy.position_size * close)) + 
+         "\n最大资金占用：" + str.tostring(math.round(max_capital_used)) +
+         "\n当前资金占用：" + str.tostring(math.round(current_capital_used)) +
+         "\n现金余额：" + str.tostring(math.round(available_cash)) + 
+         "\n持仓：" + str.tostring(strategy.position_size) +
+         "\nSlot：" + str.tostring(current_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
+         "\n市场趋势：" + market_trend_text)
+        
+
+
 // 根据DEBUG模式显示不同内容
-if DEBUG_MODE
+if DEBUG_MODE and barstate.islastconfirmedhistory
+    var table debug_table = table.new(position.top_right, 5, MAX_GRIDS + 2, bgcolor=color.white, border_width=1)
+
     // DEBUG模式：显示表格
     table.clear(debug_table, 0, 0, 4, MAX_GRIDS + 1)
     
