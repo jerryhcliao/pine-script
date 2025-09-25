@@ -81,6 +81,17 @@ var float max_capital_used = 0.0
 // 当前资金占用
 var float current_capital_used = 0.0
 
+// =============== 科创板检测函数 ===============
+// 检测是否为科创板股票（代码以688开头）
+is_sci_board_stock() =>
+    ticker_code = syminfo.ticker
+    // 科创板股票代码以688开头
+    str.starts_with(ticker_code, "688")
+
+// 获取最小买入股数（科创板200股，其他100股）
+get_min_shares() =>
+    is_sci_board_stock() ? 200 : 100
+
 // =============== 均线系统计算 ===============
 // 计算4根均线
 ma1 = ta.sma(close, 25 * 4)  // 月线
@@ -91,10 +102,6 @@ ma4 = ta.sma(close, 250 * 4) // 年线
 // 判断市场趋势
 is_bull_market = ma1 > ma2 and ma2 > ma3 and ma3 > ma4
 is_bear_market = ma1 < ma2 and ma2 < ma3 and ma3 < ma4
-
-// 计算可以买入的股数（必须是100的整数倍）
-calculate_shares(amount, price) =>
-    math.floor(amount / price / 100) * 100
 
 // 计算下一个网格买入点（根据当前网格层数使用不同参数）
 calculate_next_grid_price(last_price, current_slot) =>
@@ -108,8 +115,20 @@ calculate_take_profit_price(entry_price, current_slot) =>
     profit_percent = current_slot <= 5 ? EARLY_TAKE_PROFIT_PERCENT : LATE_TAKE_PROFIT_PERCENT
     entry_price * (1 + profit_percent)
 
+// 计算可以买入的股数（必须是100的整数倍）
+// 如果条件不允许（股数不足最小股数或资金不足），直接返回0
+calculate_initial_shares(amount, price) =>
+    min_shares = get_min_shares()
+    shares = math.floor(amount / price / 100) * 100
+    if shares >= min_shares and available_cash >= shares * price
+        shares
+    else
+        0
+
 // 计算加仓数量（根据当前网格层数和市场状态使用不同加仓策略）
+// 如果资金不足，直接返回0
 calculate_additional_shares(current_position_size, current_slot) =>
+    min_shares = get_min_shares()
     increase_percent = 0.10
     additional_shares = 0
 
@@ -117,7 +136,7 @@ calculate_additional_shares(current_position_size, current_slot) =>
         // 前5个网格：使用固定加仓比例
         increase_percent := EARLY_GRID_INCREASE_PERCENT
         additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
-        additional_shares := math.max(100, additional_shares)
+        additional_shares := math.max(min_shares, additional_shares)
     else
         // 超过5个网格：根据市场状态调整加仓比例
         if is_bear_market
@@ -128,9 +147,13 @@ calculate_additional_shares(current_position_size, current_slot) =>
             increase_percent := LATE_GRID_INCREASE_PERCENT
         
         additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
-        additional_shares := math.max(200, additional_shares)
+        additional_shares := math.max(min_shares * 2, additional_shares)
     
-    additional_shares
+    // 检查资金是否足够，如果不够则返回0
+    if available_cash >= additional_shares * close
+        additional_shares
+    else
+        0
 
 // 计算当前所有持仓的总成本
 calculate_total_capital_used() =>
@@ -167,10 +190,9 @@ add_position_condition = strategy.position_size > 0 and in_trading_timeframe and
 // =============== 执行策略 ===============
 // 初始建仓
 if initial_entry_condition
-    // 计算可以买入的股数
-    shares_to_buy = calculate_shares(INITIAL_POSITION_AMOUNT, close)
-    // 确保至少可以买入100股
-    if shares_to_buy >= 100 and available_cash >= shares_to_buy * close  
+    // 计算可以买入的股数（函数内部已包含条件检查）
+    shares_to_buy = calculate_initial_shares(INITIAL_POSITION_AMOUNT, close)
+    if shares_to_buy > 0
         entryId = "初始建仓"
 
         strategy.entry(entryId, strategy.long, qty=shares_to_buy, comment=syminfo.ticker + " 初始建仓@" + str.tostring(close))
@@ -194,11 +216,11 @@ if initial_entry_condition
         current_capital_used := calculate_total_capital_used()
         max_capital_used := math.max(max_capital_used, current_capital_used)
 else if add_position_condition
-    // 计算加仓数量（根据当前网格层数使用不同加仓比例）
+    // 计算加仓数量（函数内部已包含资金检查）
     additional_shares = calculate_additional_shares(strategy.position_size, current_slot)
 
     // 网格加仓
-    if available_cash >= additional_shares * close
+    if additional_shares > 0
         entryId = "网格加仓#" + str.tostring(next_slot)
         strategy.entry(entryId, strategy.long, qty=additional_shares, comment = 
          syminfo.ticker + " 网格加仓#" + str.tostring(next_slot) + "@" + str.tostring(close))
