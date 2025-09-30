@@ -26,13 +26,13 @@ BEAR_MARKET_INCREASE_PERCENT = 0.20                 // 超过5个网格后，熊
 MAX_GRIDS = 40                                      // 最大网格层数
 COOLDOWN_PERIOD = 4                                 // 清仓后冷却K线数
 REENTRY_DISCOUNT = 0.03                             // 提前重入回调幅度(%)
-// 股票回测时间限制 (5年)
-FIVE_YEARS_IN_MS = 5 * 365 * 24 * 60 * 60 * 1000
+// 股票回测时间限制 (自2020年1月1日)
+START_DATE_MS = timestamp("2020/01/01")
 
 // =============== 调试模式参数 ===============
 DEBUG_MODE = input.bool(false, "DEBUG模式", group="调试设置", tooltip="开启后显示详细的网格信息表格")
 
-in_trading_timeframe = time > (timenow - FIVE_YEARS_IN_MS)
+in_trading_timeframe = time > START_DATE_MS
 
 
 // --- K线时间，方便调试 ---
@@ -86,7 +86,7 @@ var float current_capital_used = 0.0
 is_sci_board_stock() =>
     ticker_code = syminfo.ticker
     // 科创板股票代码以688开头
-    str.starts_with(ticker_code, "688")
+    str.startswith(ticker_code, "688")
 
 // 获取最小买入股数（科创板200股，其他100股）
 get_min_shares() =>
