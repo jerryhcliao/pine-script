@@ -8,7 +8,7 @@ strategy("网格交易策略 - A股 (改进版)",
      default_qty_type = strategy.fixed,
      margin_long=100,
      margin_short=100,
-     process_orders_on_close=true)
+     process_orders_on_close=false)
 
 // =============== 多空交易约束 ===============
 // 仅允许做多
@@ -80,6 +80,8 @@ var float last_exit_price = 0.0
 var float max_capital_used = 0.0
 // 当前资金占用
 var float current_capital_used = 0.0
+// 累计盈利金额
+var float cumulative_profit = 0.0
 
 // =============== 科创板检测函数 ===============
 // 检测是否为科创板股票（代码以688开头）
@@ -262,6 +264,11 @@ if current_slot > 0
         else
             c := syminfo.ticker + " 清仓@" + str.tostring(close)
 
+        // 计算本次盈利：卖出价 × 股数 - 买入价 × 股数
+        current_profit = entry_quantity * close - entry_quantity * entry_price
+        // 累加到总盈利
+        cumulative_profit := cumulative_profit + current_profit
+
         // 平掉该批次的仓位
         strategy.close(entry_id, qty=entry_quantity, comment=c)
         // 更新现金余额
@@ -337,10 +344,10 @@ if barstate.islastconfirmedhistory
          "\n最大资金占用：" + str.tostring(math.round(max_capital_used)) +
          "\n当前资金占用：" + str.tostring(math.round(current_capital_used)) +
          "\n现金余额：" + str.tostring(math.round(available_cash)) + 
+         "\n累计盈利：" + str.tostring(math.round(cumulative_profit)) +
          "\n持仓：" + str.tostring(strategy.position_size) +
          "\nSlot：" + str.tostring(current_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
          "\n市场趋势：" + market_trend_text)
-        
 
 
 // 根据DEBUG模式显示不同内容
