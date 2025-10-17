@@ -14,15 +14,26 @@ strategy("网格交易策略 - A股 (改进版)",
 // 仅允许做多
 strategy.risk.allow_entry_in(strategy.direction.long)
 
-// =============== 网格策略参数 ===============
+// =============== 网格策略参数 - 普通股票 ===============
 INITIAL_POSITION_AMOUNT = 60000.0                   // 初始建仓金额(元)
-EARLY_GRID_DROP_PERCENT = 0.05                      // 前5个网格下跌百分比(%)
-EARLY_TAKE_PROFIT_PERCENT = 0.10                    // 前5个网格止盈百分比(%)
-LATE_GRID_DROP_PERCENT = 0.10                       // 超过5个网格后下跌百分比(%)
-LATE_TAKE_PROFIT_PERCENT = 0.15                     // 超过5个网格后止盈百分比(%)
-EARLY_GRID_INCREASE_PERCENT = 0.10                  // 前5个网格加仓比例(%)
-LATE_GRID_INCREASE_PERCENT = 0.15                   // 超过5个网格后加仓比例(%)
-BEAR_MARKET_INCREASE_PERCENT = 0.20                 // 超过5个网格后，熊市加仓比例(%)
+EARLY_GRID_DROP_PERCENT_NORMAL = 0.05               // 普通股票前5个网格下跌百分比(%)
+EARLY_TAKE_PROFIT_PERCENT_NORMAL = 0.10             // 普通股票前5个网格止盈百分比(%)
+LATE_GRID_DROP_PERCENT_NORMAL = 0.10                // 普通股票超过5个网格后下跌百分比(%)
+LATE_TAKE_PROFIT_PERCENT_NORMAL = 0.15              // 普通股票超过5个网格后止盈百分比(%)
+EARLY_GRID_INCREASE_PERCENT_NORMAL = 0.10           // 普通股票前5个网格加仓比例(%)
+LATE_GRID_INCREASE_PERCENT_NORMAL = 0.15            // 普通股票超过5个网格后加仓比例(%)
+BEAR_MARKET_INCREASE_PERCENT_NORMAL = 0.20          // 普通股票超过5个网格后，熊市加仓比例(%)
+
+// =============== 网格策略参数 - 科创板 ===============
+EARLY_GRID_DROP_PERCENT_SCI = 0.08                  // 科创板前5个网格下跌百分比(%)
+EARLY_TAKE_PROFIT_PERCENT_SCI = 0.16                // 科创板前5个网格止盈百分比(%)
+LATE_GRID_DROP_PERCENT_SCI = 0.12                   // 科创板超过5个网格后下跌百分比(%)
+LATE_TAKE_PROFIT_PERCENT_SCI = 0.24                 // 科创板超过5个网格后止盈百分比(%)
+EARLY_GRID_INCREASE_PERCENT_SCI = 0.10              // 科创板前5个网格加仓比例(%)
+LATE_GRID_INCREASE_PERCENT_SCI = 0.15               // 科创板超过5个网格后加仓比例(%)
+BEAR_MARKET_INCREASE_PERCENT_SCI = 0.20             // 科创板超过5个网格后，熊市加仓比例(%)
+
+// =============== 通用参数 ===============
 MAX_GRIDS = 40                                      // 最大网格层数
 COOLDOWN_PERIOD = 4                                 // 清仓后冷却K线数
 REENTRY_DISCOUNT = 0.03                             // 提前重入回调幅度(%)
@@ -60,8 +71,6 @@ k_formatted_time = str.tostring(yr) + mo_str + dy_str + hr_str + min_str
 var float[] entry_prices = array.new_float(MAX_GRIDS + 1, 0.0)
 var float[] entry_quantities = array.new_float(MAX_GRIDS + 1, 0.0)
 var string[] entry_ids = array.new_string(MAX_GRIDS + 1, "")
-
-var float available_cash = strategy.initial_capital
 // 记录最后一次买入价格（用于计算下一个网格）
 var float current_entry_price = 0.0
 // 记录下一个网格买入价格
@@ -82,17 +91,40 @@ var float max_capital_used = 0.0
 var float current_capital_used = 0.0
 // 累计盈利金额
 var float cumulative_profit = 0.0
+// 是否破产（触发加仓条件但资金不足）
+var bool is_bankrupt = false
+// 破产日期
+var string bankrupt_date = ""
 
-// =============== 科创板检测函数 ===============
+// =============== 运行时网格参数（根据股票类型初始化一次）===============
 // 检测是否为科创板股票（代码以688开头）
-is_sci_board_stock() =>
-    ticker_code = syminfo.ticker
-    // 科创板股票代码以688开头
-    str.startswith(ticker_code, "688")
+is_sci_board = str.startswith(syminfo.ticker, "688")
 
-// 获取最小买入股数（科创板200股，其他100股）
-get_min_shares() =>
-    is_sci_board_stock() ? 200 : 100
+// 根据股票类型初始化网格参数（只在第一根K线初始化一次）
+var float EARLY_GRID_DROP_PERCENT = 0.0
+var float EARLY_TAKE_PROFIT_PERCENT = 0.0
+var float LATE_GRID_DROP_PERCENT = 0.0
+var float LATE_TAKE_PROFIT_PERCENT = 0.0
+var float EARLY_GRID_INCREASE_PERCENT = 0.0
+var float LATE_GRID_INCREASE_PERCENT = 0.0
+var float BEAR_MARKET_INCREASE_PERCENT = 0.0
+var int MIN_SHARES = 0
+
+// 只在第一根K线时初始化参数
+if barstate.isfirst
+    EARLY_GRID_DROP_PERCENT := is_sci_board ? EARLY_GRID_DROP_PERCENT_SCI : EARLY_GRID_DROP_PERCENT_NORMAL
+    EARLY_TAKE_PROFIT_PERCENT := is_sci_board ? EARLY_TAKE_PROFIT_PERCENT_SCI : EARLY_TAKE_PROFIT_PERCENT_NORMAL
+    LATE_GRID_DROP_PERCENT := is_sci_board ? LATE_GRID_DROP_PERCENT_SCI : LATE_GRID_DROP_PERCENT_NORMAL
+    LATE_TAKE_PROFIT_PERCENT := is_sci_board ? LATE_TAKE_PROFIT_PERCENT_SCI : LATE_TAKE_PROFIT_PERCENT_NORMAL
+    EARLY_GRID_INCREASE_PERCENT := is_sci_board ? EARLY_GRID_INCREASE_PERCENT_SCI : EARLY_GRID_INCREASE_PERCENT_NORMAL
+    LATE_GRID_INCREASE_PERCENT := is_sci_board ? LATE_GRID_INCREASE_PERCENT_SCI : LATE_GRID_INCREASE_PERCENT_NORMAL
+    BEAR_MARKET_INCREASE_PERCENT := is_sci_board ? BEAR_MARKET_INCREASE_PERCENT_SCI : BEAR_MARKET_INCREASE_PERCENT_NORMAL
+    MIN_SHARES := is_sci_board ? 200 : 100
+
+// 计算当前可用现金（使用策略内置权益变量）
+get_available_cash() =>
+    // 可用现金 = 总权益 - 持仓市值
+    strategy.equity - strategy.position_size * close
 
 // =============== 均线系统计算 ===============
 // 计算4根均线
@@ -107,22 +139,20 @@ is_bear_market = ma1 < ma2 and ma2 < ma3 and ma3 < ma4
 
 // 计算下一个网格买入点（根据当前网格层数使用不同参数）
 calculate_next_grid_price(last_price, current_slot) =>
-    // 前5个网格使用较小的下跌幅度，超过5个网格使用较大的下跌幅度
     drop_percent = current_slot <= 5 ? EARLY_GRID_DROP_PERCENT : LATE_GRID_DROP_PERCENT
     last_price * (1 - drop_percent)
 
 // 计算止盈价格（根据当前网格层数使用不同参数）
 calculate_take_profit_price(entry_price, current_slot) =>
-    // 前5个网格使用较小的止盈幅度，超过5个网格使用较大的止盈幅度
     profit_percent = current_slot <= 5 ? EARLY_TAKE_PROFIT_PERCENT : LATE_TAKE_PROFIT_PERCENT
     entry_price * (1 + profit_percent)
 
 // 计算可以买入的股数（必须是100的整数倍）
 // 如果条件不允许（股数不足最小股数或资金不足），直接返回0
 calculate_initial_shares(amount, price) =>
-    min_shares = get_min_shares()
     shares = math.floor(amount / price / 100) * 100
-    if shares >= min_shares and available_cash >= shares * price
+    available_cash = get_available_cash()
+    if shares >= MIN_SHARES and available_cash >= shares * price
         shares
     else
         0
@@ -130,28 +160,22 @@ calculate_initial_shares(amount, price) =>
 // 计算加仓数量（根据当前网格层数和市场状态使用不同加仓策略）
 // 如果资金不足，直接返回0
 calculate_additional_shares(current_position_size, current_slot) =>
-    min_shares = get_min_shares()
     increase_percent = 0.10
     additional_shares = 0
 
     if current_slot <= 5
-        // 前5个网格：使用固定加仓比例
+        // 前5个网格：使用早期加仓比例
         increase_percent := EARLY_GRID_INCREASE_PERCENT
         additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
-        additional_shares := math.max(min_shares, additional_shares)
+        additional_shares := math.max(MIN_SHARES, additional_shares)
     else
         // 超过5个网格：根据市场状态调整加仓比例
-        if is_bear_market
-            // 熊市：加仓20%
-            increase_percent := BEAR_MARKET_INCREASE_PERCENT
-        else
-            // 非熊市：加仓15%
-            increase_percent := LATE_GRID_INCREASE_PERCENT
-        
+        increase_percent := is_bear_market ? BEAR_MARKET_INCREASE_PERCENT : LATE_GRID_INCREASE_PERCENT
         additional_shares := math.floor(current_position_size * increase_percent / 100) * 100
-        additional_shares := math.max(min_shares * 2, additional_shares)
+        additional_shares := math.max(MIN_SHARES * 2, additional_shares)
     
     // 检查资金是否足够，如果不够则返回0
+    available_cash = get_available_cash()
     if available_cash >= additional_shares * close
         additional_shares
     else
@@ -204,8 +228,6 @@ if initial_entry_condition
         array.set(entry_quantities, 1, shares_to_buy)
         array.set(entry_ids, 1, entryId)
         
-        // 记录现金余额
-        available_cash := available_cash - shares_to_buy * close
         // 记录买入价格
         current_entry_price := close
         // 更新网格状态（网格1已占用）
@@ -221,6 +243,11 @@ else if add_position_condition
     // 计算加仓数量（函数内部已包含资金检查）
     additional_shares = calculate_additional_shares(strategy.position_size, current_slot)
 
+    // 破产检测：触发加仓条件但资金不足
+    if additional_shares == 0 and not is_bankrupt
+        is_bankrupt := true
+        bankrupt_date := k_formatted_time
+
     // 网格加仓
     if additional_shares > 0
         entryId = "网格加仓#" + str.tostring(next_slot)
@@ -232,8 +259,6 @@ else if add_position_condition
         array.set(entry_quantities, next_slot, additional_shares)
         array.set(entry_ids, next_slot, entryId)
         
-        // 记录现金余额
-        available_cash := available_cash - additional_shares * close
         // 更新最后一次买入价格
         current_entry_price := close
         // 更新网格状态
@@ -271,8 +296,6 @@ if current_slot > 0
 
         // 平掉该批次的仓位
         strategy.close(entry_id, qty=entry_quantity, comment=c)
-        // 更新现金余额
-        available_cash := available_cash + entry_quantity * close
         // 减少占用的网格数量
         current_slot := current_slot - 1
         next_slot := current_slot + 1
@@ -338,16 +361,21 @@ if barstate.islastconfirmedhistory
     label.set_xy(info, bar_index, high)
     // 市场趋势文字
     market_trend_text = is_bull_market ? "🐂 牛市" : is_bear_market ? "🐻 熊市" : "📊 震荡市"
+    // 破产状态文字
+    bankrupt_text = is_bankrupt ? "⚠️ 已破产" : "✅ 正常"
+    // 破产日期文字（仅在破产时显示）
+    bankrupt_date_text = is_bankrupt ? "\n破产日期：" + bankrupt_date : ""
 
     label.set_text(info, "网格交易策略" + 
          "\n\n价值：" + str.tostring(math.round(strategy.position_size * close)) + 
          "\n最大资金占用：" + str.tostring(math.round(max_capital_used)) +
          "\n当前资金占用：" + str.tostring(math.round(current_capital_used)) +
-         "\n现金余额：" + str.tostring(math.round(available_cash)) + 
+         "\n现金余额：" + str.tostring(math.round(get_available_cash())) + 
+         "\n资金状态：" + bankrupt_text + bankrupt_date_text +
          "\n累计盈利：" + str.tostring(math.round(cumulative_profit)) +
          "\n持仓：" + str.tostring(strategy.position_size) +
          "\nSlot：" + str.tostring(current_slot) + "|" + str.tostring(math.round(strategy.position_avg_price,2)) +
-         "\n市场趋势：" + market_trend_text)
+         "\n市场趋势：" + market_trend_text )
 
 
 // 根据DEBUG模式显示不同内容
