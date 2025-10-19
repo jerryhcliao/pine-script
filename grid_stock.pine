@@ -27,8 +27,8 @@ BEAR_MARKET_INCREASE_PERCENT_NORMAL = 0.20          // 普通股票超过5个网
 // =============== 网格策略参数 - 科创板 ===============
 EARLY_GRID_DROP_PERCENT_SCI = 0.08                  // 科创板前5个网格下跌百分比(%)
 EARLY_TAKE_PROFIT_PERCENT_SCI = 0.16                // 科创板前5个网格止盈百分比(%)
-LATE_GRID_DROP_PERCENT_SCI = 0.12                   // 科创板超过5个网格后下跌百分比(%)
-LATE_TAKE_PROFIT_PERCENT_SCI = 0.24                 // 科创板超过5个网格后止盈百分比(%)
+LATE_GRID_DROP_PERCENT_SCI = 0.14                   // 科创板超过5个网格后下跌百分比(%)
+LATE_TAKE_PROFIT_PERCENT_SCI = 0.28                 // 科创板超过5个网格后止盈百分比(%)
 EARLY_GRID_INCREASE_PERCENT_SCI = 0.10              // 科创板前5个网格加仓比例(%)
 LATE_GRID_INCREASE_PERCENT_SCI = 0.15               // 科创板超过5个网格后加仓比例(%)
 BEAR_MARKET_INCREASE_PERCENT_SCI = 0.20             // 科创板超过5个网格后，熊市加仓比例(%)
