@@ -15,7 +15,7 @@ strategy("网格交易策略 - A股 (改进版)",
 strategy.risk.allow_entry_in(strategy.direction.long)
 
 // =============== 网格策略参数 - 普通股票 ===============
-INITIAL_POSITION_AMOUNT = 60000.0                   // 初始建仓金额(元)
+INITIAL_POSITION_AMOUNT_NORMAL = 60000.0            // 初始建仓金额(元)
 EARLY_GRID_DROP_PERCENT_NORMAL = 0.05               // 普通股票前5个网格下跌百分比(%)
 EARLY_TAKE_PROFIT_PERCENT_NORMAL = 0.10             // 普通股票前5个网格止盈百分比(%)
 LATE_GRID_DROP_PERCENT_NORMAL = 0.10                // 普通股票超过5个网格后下跌百分比(%)
@@ -25,6 +25,7 @@ LATE_GRID_INCREASE_PERCENT_NORMAL = 0.15            // 普通股票超过5个网
 BEAR_MARKET_INCREASE_PERCENT_NORMAL = 0.20          // 普通股票超过5个网格后，熊市加仓比例(%)
 
 // =============== 网格策略参数 - 科创板 ===============
+INITIAL_POSITION_AMOUNT_SCI = 60000.0               // 初始建仓金额(元)
 EARLY_GRID_DROP_PERCENT_SCI = 0.08                  // 科创板前5个网格下跌百分比(%)
 EARLY_TAKE_PROFIT_PERCENT_SCI = 0.16                // 科创板前5个网格止盈百分比(%)
 LATE_GRID_DROP_PERCENT_SCI = 0.14                   // 科创板超过5个网格后下跌百分比(%)
@@ -32,6 +33,16 @@ LATE_TAKE_PROFIT_PERCENT_SCI = 0.28                 // 科创板超过5个网格
 EARLY_GRID_INCREASE_PERCENT_SCI = 0.10              // 科创板前5个网格加仓比例(%)
 LATE_GRID_INCREASE_PERCENT_SCI = 0.15               // 科创板超过5个网格后加仓比例(%)
 BEAR_MARKET_INCREASE_PERCENT_SCI = 0.20             // 科创板超过5个网格后，熊市加仓比例(%)
+
+// =============== 网格策略参数 - 指数基金(ETF) ===============
+INITIAL_POSITION_AMOUNT_ETF = 100000.0              // 初始建仓金额(元)
+EARLY_GRID_DROP_PERCENT_ETF = 0.05                  // 指数基金前5个网格下跌百分比(%)
+EARLY_TAKE_PROFIT_PERCENT_ETF = 0.10                // 指数基金前5个网格止盈百分比(%)
+LATE_GRID_DROP_PERCENT_ETF = 0.10                   // 指数基金超过5个网格后下跌百分比(%)
+LATE_TAKE_PROFIT_PERCENT_ETF = 0.15                 // 指数基金超过5个网格后止盈百分比(%)
+EARLY_GRID_INCREASE_PERCENT_ETF = 0.10              // 指数基金前5个网格加仓比例(%)
+LATE_GRID_INCREASE_PERCENT_ETF = 0.15               // 指数基金超过5个网格后加仓比例(%)
+BEAR_MARKET_INCREASE_PERCENT_ETF = 0.20             // 指数基金超过5个网格后，熊市加仓比例(%)
 
 // =============== 通用参数 ===============
 MAX_GRIDS = 40                                      // 最大网格层数
@@ -99,8 +110,12 @@ var string bankrupt_date = ""
 // =============== 运行时网格参数（根据股票类型初始化一次）===============
 // 检测是否为科创板股票（代码以688开头）
 is_sci_board = str.startswith(syminfo.ticker, "688")
+// 检测是否为指数基金(ETF)
+etf_tickers = array.from("159632", "159915")
+is_etf = array.includes(etf_tickers, syminfo.ticker)
 
 // 根据股票类型初始化网格参数（只在第一根K线初始化一次）
+var float INITIAL_POSITION_AMOUNT = 0.0
 var float EARLY_GRID_DROP_PERCENT = 0.0
 var float EARLY_TAKE_PROFIT_PERCENT = 0.0
 var float LATE_GRID_DROP_PERCENT = 0.0
@@ -112,14 +127,40 @@ var int MIN_SHARES = 0
 
 // 只在第一根K线时初始化参数
 if barstate.isfirst
-    EARLY_GRID_DROP_PERCENT := is_sci_board ? EARLY_GRID_DROP_PERCENT_SCI : EARLY_GRID_DROP_PERCENT_NORMAL
-    EARLY_TAKE_PROFIT_PERCENT := is_sci_board ? EARLY_TAKE_PROFIT_PERCENT_SCI : EARLY_TAKE_PROFIT_PERCENT_NORMAL
-    LATE_GRID_DROP_PERCENT := is_sci_board ? LATE_GRID_DROP_PERCENT_SCI : LATE_GRID_DROP_PERCENT_NORMAL
-    LATE_TAKE_PROFIT_PERCENT := is_sci_board ? LATE_TAKE_PROFIT_PERCENT_SCI : LATE_TAKE_PROFIT_PERCENT_NORMAL
-    EARLY_GRID_INCREASE_PERCENT := is_sci_board ? EARLY_GRID_INCREASE_PERCENT_SCI : EARLY_GRID_INCREASE_PERCENT_NORMAL
-    LATE_GRID_INCREASE_PERCENT := is_sci_board ? LATE_GRID_INCREASE_PERCENT_SCI : LATE_GRID_INCREASE_PERCENT_NORMAL
-    BEAR_MARKET_INCREASE_PERCENT := is_sci_board ? BEAR_MARKET_INCREASE_PERCENT_SCI : BEAR_MARKET_INCREASE_PERCENT_NORMAL
-    MIN_SHARES := is_sci_board ? 200 : 100
+    // 根据股票类型选择参数：优先级 指数基金(ETF) > 科创板 > 普通股票
+    if is_etf
+        // 指数基金(ETF)参数
+        INITIAL_POSITION_AMOUNT := INITIAL_POSITION_AMOUNT_ETF
+        EARLY_GRID_DROP_PERCENT := EARLY_GRID_DROP_PERCENT_ETF
+        EARLY_TAKE_PROFIT_PERCENT := EARLY_TAKE_PROFIT_PERCENT_ETF
+        LATE_GRID_DROP_PERCENT := LATE_GRID_DROP_PERCENT_ETF
+        LATE_TAKE_PROFIT_PERCENT := LATE_TAKE_PROFIT_PERCENT_ETF
+        EARLY_GRID_INCREASE_PERCENT := EARLY_GRID_INCREASE_PERCENT_ETF
+        LATE_GRID_INCREASE_PERCENT := LATE_GRID_INCREASE_PERCENT_ETF
+        BEAR_MARKET_INCREASE_PERCENT := BEAR_MARKET_INCREASE_PERCENT_ETF
+        MIN_SHARES := 100
+    else if is_sci_board
+        // 科创板参数
+        INITIAL_POSITION_AMOUNT := INITIAL_POSITION_AMOUNT_SCI
+        EARLY_GRID_DROP_PERCENT := EARLY_GRID_DROP_PERCENT_SCI
+        EARLY_TAKE_PROFIT_PERCENT := EARLY_TAKE_PROFIT_PERCENT_SCI
+        LATE_GRID_DROP_PERCENT := LATE_GRID_DROP_PERCENT_SCI
+        LATE_TAKE_PROFIT_PERCENT := LATE_TAKE_PROFIT_PERCENT_SCI
+        EARLY_GRID_INCREASE_PERCENT := EARLY_GRID_INCREASE_PERCENT_SCI
+        LATE_GRID_INCREASE_PERCENT := LATE_GRID_INCREASE_PERCENT_SCI
+        BEAR_MARKET_INCREASE_PERCENT := BEAR_MARKET_INCREASE_PERCENT_SCI
+        MIN_SHARES := 200
+    else
+        // 普通股票参数
+        INITIAL_POSITION_AMOUNT := INITIAL_POSITION_AMOUNT_NORMAL
+        EARLY_GRID_DROP_PERCENT := EARLY_GRID_DROP_PERCENT_NORMAL
+        EARLY_TAKE_PROFIT_PERCENT := EARLY_TAKE_PROFIT_PERCENT_NORMAL
+        LATE_GRID_DROP_PERCENT := LATE_GRID_DROP_PERCENT_NORMAL
+        LATE_TAKE_PROFIT_PERCENT := LATE_TAKE_PROFIT_PERCENT_NORMAL
+        EARLY_GRID_INCREASE_PERCENT := EARLY_GRID_INCREASE_PERCENT_NORMAL
+        LATE_GRID_INCREASE_PERCENT := LATE_GRID_INCREASE_PERCENT_NORMAL
+        BEAR_MARKET_INCREASE_PERCENT := BEAR_MARKET_INCREASE_PERCENT_NORMAL
+        MIN_SHARES := 100
 
 // 计算当前可用现金（使用策略内置权益变量）
 get_available_cash() =>
@@ -299,6 +340,8 @@ if current_slot > 0
         // 减少占用的网格数量
         current_slot := current_slot - 1
         next_slot := current_slot + 1
+
+        current_capital_used := calculate_total_capital_used()
 
         if current_slot > 0
             // 回到上一级网格价格
