@@ -23,6 +23,8 @@ LATE_TAKE_PROFIT_PERCENT_NORMAL = 0.15              // 普通股票超过5个网
 EARLY_GRID_INCREASE_PERCENT_NORMAL = 0.10           // 普通股票前5个网格加仓比例(%)
 LATE_GRID_INCREASE_PERCENT_NORMAL = 0.15            // 普通股票超过5个网格后加仓比例(%)
 BEAR_MARKET_INCREASE_PERCENT_NORMAL = 0.20          // 普通股票超过5个网格后，熊市加仓比例(%)
+RSI_BUY_THRESHOLD_NORMAL = 25                       // 普通股票买入RSI阈值
+RSI_SELL_THRESHOLD_NORMAL = 75                      // 普通股票卖出RSI阈值
 
 // =============== 网格策略参数 - 科创板 ===============
 INITIAL_POSITION_AMOUNT_SCI = 60000.0               // 初始建仓金额(元)
@@ -33,6 +35,8 @@ LATE_TAKE_PROFIT_PERCENT_SCI = 0.28                 // 科创板超过5个网格
 EARLY_GRID_INCREASE_PERCENT_SCI = 0.10              // 科创板前5个网格加仓比例(%)
 LATE_GRID_INCREASE_PERCENT_SCI = 0.15               // 科创板超过5个网格后加仓比例(%)
 BEAR_MARKET_INCREASE_PERCENT_SCI = 0.20             // 科创板超过5个网格后，熊市加仓比例(%)
+RSI_BUY_THRESHOLD_SCI = 25                          // 科创板买入RSI阈值
+RSI_SELL_THRESHOLD_SCI = 75                         // 科创板卖出RSI阈值
 
 // =============== 网格策略参数 - 指数基金(ETF) ===============
 INITIAL_POSITION_AMOUNT_ETF = 100000.0              // 初始建仓金额(元)
@@ -43,6 +47,8 @@ LATE_TAKE_PROFIT_PERCENT_ETF = 0.15                 // 指数基金超过5个网
 EARLY_GRID_INCREASE_PERCENT_ETF = 0.10              // 指数基金前5个网格加仓比例(%)
 LATE_GRID_INCREASE_PERCENT_ETF = 0.15               // 指数基金超过5个网格后加仓比例(%)
 BEAR_MARKET_INCREASE_PERCENT_ETF = 0.20             // 指数基金超过5个网格后，熊市加仓比例(%)
+RSI_BUY_THRESHOLD_ETF = 35                          // 指数基金买入RSI阈值
+RSI_SELL_THRESHOLD_ETF = 65                         // 指数基金卖出RSI阈值
 
 // =============== 通用参数 ===============
 MAX_GRIDS = 40                                      // 最大网格层数
@@ -124,6 +130,8 @@ var float EARLY_GRID_INCREASE_PERCENT = 0.0
 var float LATE_GRID_INCREASE_PERCENT = 0.0
 var float BEAR_MARKET_INCREASE_PERCENT = 0.0
 var int MIN_SHARES = 0
+var int RSI_BUY_THRESHOLD = 0
+var int RSI_SELL_THRESHOLD = 0
 
 // 只在第一根K线时初始化参数
 if barstate.isfirst
@@ -138,6 +146,8 @@ if barstate.isfirst
         EARLY_GRID_INCREASE_PERCENT := EARLY_GRID_INCREASE_PERCENT_ETF
         LATE_GRID_INCREASE_PERCENT := LATE_GRID_INCREASE_PERCENT_ETF
         BEAR_MARKET_INCREASE_PERCENT := BEAR_MARKET_INCREASE_PERCENT_ETF
+        RSI_BUY_THRESHOLD := RSI_BUY_THRESHOLD_ETF
+        RSI_SELL_THRESHOLD := RSI_SELL_THRESHOLD_ETF
         MIN_SHARES := 100
     else if is_sci_board
         // 科创板参数
@@ -149,6 +159,8 @@ if barstate.isfirst
         EARLY_GRID_INCREASE_PERCENT := EARLY_GRID_INCREASE_PERCENT_SCI
         LATE_GRID_INCREASE_PERCENT := LATE_GRID_INCREASE_PERCENT_SCI
         BEAR_MARKET_INCREASE_PERCENT := BEAR_MARKET_INCREASE_PERCENT_SCI
+        RSI_BUY_THRESHOLD := RSI_BUY_THRESHOLD_SCI
+        RSI_SELL_THRESHOLD := RSI_SELL_THRESHOLD_SCI
         MIN_SHARES := 200
     else
         // 普通股票参数
@@ -160,6 +172,8 @@ if barstate.isfirst
         EARLY_GRID_INCREASE_PERCENT := EARLY_GRID_INCREASE_PERCENT_NORMAL
         LATE_GRID_INCREASE_PERCENT := LATE_GRID_INCREASE_PERCENT_NORMAL
         BEAR_MARKET_INCREASE_PERCENT := BEAR_MARKET_INCREASE_PERCENT_NORMAL
+        RSI_BUY_THRESHOLD := RSI_BUY_THRESHOLD_NORMAL
+        RSI_SELL_THRESHOLD := RSI_SELL_THRESHOLD_NORMAL
         MIN_SHARES := 100
 
 // 计算当前可用现金（使用策略内置权益变量）
@@ -177,6 +191,9 @@ ma4 = ta.sma(close, 250 * 4) // 年线
 // 判断市场趋势
 is_bull_market = ma1 > ma2 and ma2 > ma3 and ma3 > ma4
 is_bear_market = ma1 < ma2 and ma2 < ma3 and ma3 < ma4
+
+// 计算 rsi
+rsi = ta.rsi(close, 5 * 4)
 
 // 计算下一个网格买入点（根据当前网格层数使用不同参数）
 calculate_next_grid_price(last_price, current_slot) =>
@@ -252,13 +269,19 @@ entry_condition_2 = cooldown_finished or price_dropped_enough
 initial_entry_condition = entry_condition_1 and entry_condition_2
 
 // 加仓条件（价格下跌至下一个网格点且活跃网格数小于最大值）
-add_position_condition = strategy.position_size > 0 and in_trading_timeframe and close <= next_grid_price and current_slot > 0 and current_slot < MAX_GRIDS
+add_position_condition = strategy.position_size > 0 
+     and in_trading_timeframe 
+     and close <= next_grid_price 
+     and current_slot > 0 
+     and current_slot < MAX_GRIDS
+     and rsi <= RSI_BUY_THRESHOLD
 
 // =============== 执行策略 ===============
 // 初始建仓
 if initial_entry_condition
     // 计算可以买入的股数（函数内部已包含条件检查）
     shares_to_buy = calculate_initial_shares(INITIAL_POSITION_AMOUNT, close)
+    
     if shares_to_buy > 0
         entryId = "初始建仓"
 
@@ -323,7 +346,7 @@ if current_slot > 0
     current_grid_profit_price := calculate_take_profit_price(entry_price, current_slot)
     
     // 检查是否达到止盈条件
-    if close >= current_grid_profit_price
+    if close >= current_grid_profit_price and rsi >= RSI_SELL_THRESHOLD
         c = ""
         if current_slot > 1
             c:= syminfo.ticker + " 批次止盈#" + str.tostring(current_slot) +"@" + str.tostring(close)
